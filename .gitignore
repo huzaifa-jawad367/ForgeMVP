@@ -1,0 +1,129 @@
+# ==============================================================================
+# Forge - .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Python & Virtual Environments
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Packaging & Distribution
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing, Coverage & Linters
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ------------------------------------------------------------------------------
+# Computer Vision / ML Models & Weights
+# ------------------------------------------------------------------------------
+# YOLO / Ultralytics weights (auto-downloaded) & training output runs
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+runs/
+weights/
+
+# ------------------------------------------------------------------------------
+# Application Runtime Data & Evidence
+# ------------------------------------------------------------------------------
+# SQLite databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+forge.db
+
+# Incident evidence frames, snapshots, and logs
+outputs/*
+!outputs/.gitkeep
+
+# Video files & media assets (can be regenerated with generate_video.py)
+video.mp4
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# ------------------------------------------------------------------------------
+# Frontend / Dashboard (React + Vite)
+# ------------------------------------------------------------------------------
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+.pnp
+.pnp.js
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ------------------------------------------------------------------------------
+# Environment Variables & Secrets
+# ------------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.env
+
+# ------------------------------------------------------------------------------
+# Operating System & IDE Files
+# ------------------------------------------------------------------------------
+# OS metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+ehthumbs_vista.db
+Thumbs.db
+desktop.ini
+
+# IDEs & Editors
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
