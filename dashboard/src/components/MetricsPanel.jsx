@@ -1,0 +1,204 @@
+import React, { useMemo } from 'react';
+import {
+  AreaChart, Area, LineChart, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
+} from 'recharts';
+import CircularGauge from './CircularGauge';
+
+/* ── Custom tooltip ── */
+function CyberTooltip({ active, payload, label, suffix = '' }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="cyber-tooltip">
+      <p className="cyber-tooltip__label">{label}</p>
+      {payload.map((p, i) => (
+        <p key={i} className="cyber-tooltip__value" style={{ color: p.color }}>
+          {p.name}: <span className="mono">{Number(p.value).toFixed(2)}{suffix}</span>
+        </p>
+      ))}
+    </div>
+  );
+}
+
+export default function MetricsPanel({ metricsHistory, latestMetrics }) {
+  /* Derive chart data from history array */
+  const fpsData = useMemo(() =>
+    (metricsHistory || []).map((m, i) => ({
+      time: i,
+      fps: m?.fps ?? 0,
+    })).slice(-60),
+  [metricsHistory]);
+
+  const confidenceData = useMemo(() =>
+    (metricsHistory || []).map((m, i) => ({
+      time: i,
+      confidence: m?.mean_confidence ?? 0,
+    })).slice(-60),
+  [metricsHistory]);
+
+  const latest = latestMetrics || {};
+  const sys = latest.system || {};
+
+  return (
+    <section className="metrics-panel">
+      {/* ── FPS Chart ── */}
+      <div className="chart-card chart-card--fps fade-in">
+        <div className="chart-card__header">
+          <h3 className="chart-card__title">
+            <span className="chart-card__dot" style={{ background: 'var(--cyan)' }} />
+            Frames Per Second
+          </h3>
+          <span className="chart-card__live mono">
+            {(latest.fps ?? 0).toFixed(1)} FPS
+          </span>
+        </div>
+        <div className="chart-card__body">
+          <ResponsiveContainer width="100%" height={180}>
+            <AreaChart data={fpsData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="fpsGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#00f0ff" stopOpacity={0.35} />
+                  <stop offset="100%" stopColor="#00f0ff" stopOpacity={0.0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="time" tick={false} axisLine={false} />
+              <YAxis
+                domain={[0, 'auto']}
+                tick={{ fill: '#555770', fontSize: 10, fontFamily: 'var(--font-mono)' }}
+                axisLine={false}
+                tickLine={false}
+              />
+              <Tooltip content={<CyberTooltip suffix=" fps" />} />
+              <Area
+                type="monotone"
+                dataKey="fps"
+                stroke="#00f0ff"
+                strokeWidth={2}
+                fill="url(#fpsGrad)"
+                animationDuration={500}
+                dot={false}
+                activeDot={{ r: 4, stroke: '#00f0ff', strokeWidth: 2, fill: '#0a0a0f' }}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* ── Confidence Chart ── */}
+      <div className="chart-card chart-card--conf fade-in" style={{ animationDelay: '0.1s' }}>
+        <div className="chart-card__header">
+          <h3 className="chart-card__title">
+            <span className="chart-card__dot" style={{ background: 'var(--green)' }} />
+            Detection Confidence
+          </h3>
+          <span className="chart-card__live mono" style={{ color: 'var(--green)' }}>
+            {(latest.mean_confidence ?? 0).toFixed(3)}
+          </span>
+        </div>
+        <div className="chart-card__body">
+          <ResponsiveContainer width="100%" height={180}>
+            <LineChart data={confidenceData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="confGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#00ff88" stopOpacity={0.2} />
+                  <stop offset="100%" stopColor="#00ff88" stopOpacity={0.0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="time" tick={false} axisLine={false} />
+              <YAxis
+                domain={[0, 1]}
+                tick={{ fill: '#555770', fontSize: 10, fontFamily: 'var(--font-mono)' }}
+                axisLine={false}
+                tickLine={false}
+                ticks={[0, 0.25, 0.5, 0.7, 1.0]}
+              />
+              <Tooltip content={<CyberTooltip />} />
+              <ReferenceLine
+                y={0.7}
+                stroke="#ff2d55"
+                strokeDasharray="6 4"
+                strokeWidth={1.5}
+                label={{
+                  value: 'THRESHOLD',
+                  position: 'insideTopRight',
+                  fill: '#ff2d55',
+                  fontSize: 10,
+                  fontFamily: 'var(--font-mono)',
+                }}
+              />
+              <Line
+                type="monotone"
+                dataKey="confidence"
+                stroke="#00ff88"
+                strokeWidth={2}
+                dot={false}
+                activeDot={{ r: 4, stroke: '#00ff88', strokeWidth: 2, fill: '#0a0a0f' }}
+                animationDuration={500}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* ── System metrics row ── */}
+      <div className="system-metrics fade-in" style={{ animationDelay: '0.2s' }}>
+        <h3 className="system-metrics__title">System Resources</h3>
+        <div className="system-metrics__gauges">
+          <CircularGauge
+            value={sys.cpu_percent ?? 0}
+            label="CPU"
+            color={getGaugeColor(sys.cpu_percent ?? 0)}
+            glowing
+          />
+          <CircularGauge
+            value={sys.memory_percent ?? 0}
+            label="RAM"
+            color={getGaugeColor(sys.memory_percent ?? 0)}
+            glowing
+          />
+          <CircularGauge
+            value={sys.gpu_percent ?? 0}
+            label="GPU"
+            color={getGaugeColor(sys.gpu_percent ?? 0)}
+            glowing
+          />
+        </div>
+      </div>
+
+      {/* ── Image quality ── */}
+      <div className="image-quality fade-in" style={{ animationDelay: '0.3s' }}>
+        <h3 className="image-quality__title">Image Quality</h3>
+        <div className="image-quality__gauges">
+          <CircularGauge
+            value={latest.brightness ?? 0}
+            max={255}
+            label="Brightness"
+            unit=""
+            color="var(--amber)"
+            size={72}
+            stroke={5}
+            glowing
+          />
+          <CircularGauge
+            value={latest.blur_score ?? 0}
+            max={1000}
+            label="Blur Score"
+            unit=""
+            color="var(--purple)"
+            size={72}
+            stroke={5}
+            glowing
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function getGaugeColor(pct) {
+  if (pct > 85) return 'var(--red)';
+  if (pct > 60) return 'var(--amber)';
+  return 'var(--cyan)';
+}
