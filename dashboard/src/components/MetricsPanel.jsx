@@ -36,6 +36,14 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
     })).slice(-60),
   [metricsHistory]);
 
+  const noiseData = useMemo(() =>
+    (metricsHistory || []).map((m, i) => ({
+      time: i,
+      noise_level: m?.noise_level ?? 0,
+      noise_score: m?.noise_score ?? 0,
+    })).slice(-60),
+  [metricsHistory]);
+
   const latest = latestMetrics || {};
   const sys = latest.system || {};
 
@@ -46,14 +54,14 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
         <div className="chart-card__header">
           <h3 className="chart-card__title">
             <span className="chart-card__dot" style={{ background: 'var(--cyan)' }} />
-            Frames Per Second
+            Streaming Throughput (FPS)
           </h3>
           <span className="chart-card__live mono">
             {(latest.fps ?? 0).toFixed(1)} FPS
           </span>
         </div>
         <div className="chart-card__body">
-          <ResponsiveContainer width="100%" height={180}>
+          <ResponsiveContainer width="100%" height={160}>
             <AreaChart data={fpsData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
               <defs>
                 <linearGradient id="fpsGrad" x1="0" y1="0" x2="0" y2="1">
@@ -73,10 +81,11 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
               <Area
                 type="monotone"
                 dataKey="fps"
+                name="FPS"
                 stroke="#00f0ff"
                 strokeWidth={2}
                 fill="url(#fpsGrad)"
-                animationDuration={500}
+                animationDuration={300}
                 dot={false}
                 activeDot={{ r: 4, stroke: '#00f0ff', strokeWidth: 2, fill: '#0a0a0f' }}
               />
@@ -90,14 +99,14 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
         <div className="chart-card__header">
           <h3 className="chart-card__title">
             <span className="chart-card__dot" style={{ background: 'var(--green)' }} />
-            Detection Confidence
+            Anomaly Score / Detection Confidence
           </h3>
-          <span className="chart-card__live mono" style={{ color: 'var(--green)' }}>
+          <span className="chart-card__live mono" style={{ color: (latest.mean_confidence ?? 0) >= 0.5 ? 'var(--red)' : 'var(--green)' }}>
             {(latest.mean_confidence ?? 0).toFixed(3)}
           </span>
         </div>
         <div className="chart-card__body">
-          <ResponsiveContainer width="100%" height={180}>
+          <ResponsiveContainer width="100%" height={160}>
             <LineChart data={confidenceData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
               <defs>
                 <linearGradient id="confGrad" x1="0" y1="0" x2="0" y2="1">
@@ -112,16 +121,16 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
                 tick={{ fill: '#555770', fontSize: 10, fontFamily: 'var(--font-mono)' }}
                 axisLine={false}
                 tickLine={false}
-                ticks={[0, 0.25, 0.5, 0.7, 1.0]}
+                ticks={[0, 0.25, 0.5, 0.75, 1.0]}
               />
               <Tooltip content={<CyberTooltip />} />
               <ReferenceLine
-                y={0.7}
+                y={0.5}
                 stroke="#ff2d55"
                 strokeDasharray="6 4"
                 strokeWidth={1.5}
                 label={{
-                  value: 'THRESHOLD',
+                  value: 'ANOMALY THRESHOLD (0.50)',
                   position: 'insideTopRight',
                   fill: '#ff2d55',
                   fontSize: 10,
@@ -131,13 +140,60 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
               <Line
                 type="monotone"
                 dataKey="confidence"
-                stroke="#00ff88"
+                name="Confidence"
+                stroke={(latest.mean_confidence ?? 0) >= 0.5 ? '#ff2d55' : '#00ff88'}
                 strokeWidth={2}
                 dot={false}
                 activeDot={{ r: 4, stroke: '#00ff88', strokeWidth: 2, fill: '#0a0a0f' }}
-                animationDuration={500}
+                animationDuration={300}
               />
             </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* ── Sensor Noise Injection Real-Time Trend ── */}
+      <div className="chart-card chart-card--noise fade-in" style={{ animationDelay: '0.15s' }}>
+        <div className="chart-card__header">
+          <h3 className="chart-card__title">
+            <span className="chart-card__dot" style={{ background: 'var(--amber)' }} />
+            Sensor Noise Injection Trend
+          </h3>
+          <span className="chart-card__live mono" style={{ color: 'var(--amber)' }}>
+            {(latest.noise_level ?? 0).toFixed(0)}%
+          </span>
+        </div>
+        <div className="chart-card__body">
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart data={noiseData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="noiseGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#ffb800" stopOpacity={0.35} />
+                  <stop offset="100%" stopColor="#ffb800" stopOpacity={0.0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="time" tick={false} axisLine={false} />
+              <YAxis
+                domain={[0, 100]}
+                tick={{ fill: '#555770', fontSize: 10, fontFamily: 'var(--font-mono)' }}
+                axisLine={false}
+                tickLine={false}
+                ticks={[0, 25, 50, 75, 100]}
+              />
+              <Tooltip content={<CyberTooltip suffix="%" />} />
+              <Area
+                type="monotone"
+                dataKey="noise_level"
+                name="Noise Injection Level"
+                stroke="#ffb800"
+                strokeWidth={2}
+                fill="url(#noiseGrad)"
+                animationDuration={300}
+                dot={false}
+                activeDot={{ r: 4, stroke: '#ffb800', strokeWidth: 2, fill: '#0a0a0f' }}
+              />
+            </AreaChart>
           </ResponsiveContainer>
         </div>
       </div>
@@ -167,9 +223,9 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
         </div>
       </div>
 
-      {/* ── Image quality ── */}
-      <div className="image-quality fade-in" style={{ animationDelay: '0.3s' }}>
-        <h3 className="image-quality__title">Image Quality</h3>
+      {/* ── Image quality & Sensor metrics ── */}
+      <div className="image-quality fade-in" style={{ animationDelay: '0.25s' }}>
+        <h3 className="image-quality__title">Optical & Sensor Quality</h3>
         <div className="image-quality__gauges">
           <CircularGauge
             value={latest.brightness ?? 0}
@@ -190,6 +246,16 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
             size={72}
             stroke={5}
             glowing
+          />
+          <CircularGauge
+            value={latest.noise_level ?? 0}
+            max={100}
+            label="Noise Level"
+            unit="%"
+            color={latest.noise_level > 40 ? 'var(--red)' : latest.noise_level > 10 ? 'var(--amber)' : 'var(--cyan)'}
+            size={72}
+            stroke={5}
+            glowing={latest.noise_level > 0}
           />
         </div>
       </div>

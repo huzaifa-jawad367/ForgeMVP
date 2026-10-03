@@ -8,6 +8,20 @@
 
 const pipelines = [
   {
+    id: 'pcb1-visa',
+    name: 'VisA PCB-1 Conveyor Inspection',
+    site: 'Factory A · Surface Mount Line',
+    sourceType: 'stream',
+    source: 'visa:pcb1',
+    model: 'EfficientAD Medium (Anomalib)',
+    modelVersion: 'v1.0.0-visa',
+    status: 'healthy',
+    fps: 10.0,
+    meanConfidence: 0.88,
+    incidents: 0,
+    lastSeen: 'Live',
+  },
+  {
     id: 'bottle-line-01',
     name: 'Bottle Inspection Line 01',
     site: 'Factory A',

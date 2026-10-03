@@ -4,6 +4,7 @@ import StatusBar from '../components/StatusBar';
 import MetricsPanel from '../components/MetricsPanel';
 import IncidentFeed from '../components/IncidentFeed';
 import IncidentModal from '../components/IncidentModal';
+import LiveStreamViewer from '../components/LiveStreamViewer';
 import DemoControls from '../components/DemoControls';
 import { usePipelineStatus } from '../hooks/useForgeApi';
 import { useTelemetryStream } from '../hooks/useTelemetry';
@@ -54,10 +55,17 @@ export default function DiagnosticPage() {
 
       {/* Main content area */}
       <main className="app__main">
-        <MetricsPanel
-          metricsHistory={metricsHistory}
-          latestMetrics={latestMetrics}
-        />
+        <div className="app__stream-and-metrics">
+          <LiveStreamViewer
+            pipeline={pipeline}
+            latestMetrics={latestMetrics}
+            pipelineStatus={pipelineStatus}
+          />
+          <MetricsPanel
+            metricsHistory={metricsHistory}
+            latestMetrics={latestMetrics}
+          />
+        </div>
         <IncidentFeed
           incidents={incidentList}
           onSelect={setSelectedIncident}

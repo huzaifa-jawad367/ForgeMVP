@@ -1,26 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { postDegrade, postReset } from '../hooks/useForgeApi';
 
 const SLIDERS = [
-  { key: 'blur',       label: 'Blur Injection',           unit: '%',  min: 0, max: 100 },
+  { key: 'noise',      label: 'Sensor Noise Injection',   unit: '%',  min: 0, max: 100 },
+  { key: 'blur',       label: 'Lens Blur Injection',      unit: '%',  min: 0, max: 100 },
   { key: 'brightness', label: 'Brightness Reduction',     unit: '%',  min: 0, max: 100 },
   { key: 'confidence', label: 'Confidence Degradation',   unit: '%',  min: 0, max: 100 },
-  { key: 'latency',    label: 'Latency Injection',        unit: 'ms', min: 0, max: 100 },
+  { key: 'latency',    label: 'Pipeline Latency Lag',     unit: 'ms', min: 0, max: 100 },
 ];
 
 export default function DemoControls() {
-  const [collapsed, setCollapsed] = useState(true);
-  const [values, setValues] = useState({ blur: 0, brightness: 0, confidence: 0, latency: 0 });
+  const [collapsed, setCollapsed] = useState(false);
+  const [values, setValues] = useState({ noise: 0, blur: 0, brightness: 0, confidence: 0, latency: 0 });
   const [sending, setSending] = useState(false);
+  const debounceTimerRef = useRef(null);
 
-  const handleChange = (key, val) => {
-    setValues((prev) => ({ ...prev, [key]: Number(val) }));
-  };
-
-  const handleApply = async () => {
+  const applyValues = async (vals) => {
     setSending(true);
     try {
-      await postDegrade(values);
+      await postDegrade(vals);
     } catch (e) {
       console.error('Degrade failed:', e);
     } finally {
@@ -28,11 +26,30 @@ export default function DemoControls() {
     }
   };
 
+  const handleChange = (key, val) => {
+    const num = Number(val);
+    setValues((prev) => {
+      const next = { ...prev, [key]: num };
+      // Debounce auto-apply so live slider movements update backend immediately
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = setTimeout(() => {
+        applyValues(next);
+      }, 120);
+      return next;
+    });
+  };
+
+  const handleApply = async () => {
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    await applyValues(values);
+  };
+
   const handleReset = async () => {
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     setSending(true);
     try {
       await postReset();
-      setValues({ blur: 0, brightness: 0, confidence: 0, latency: 0 });
+      setValues({ noise: 0, blur: 0, brightness: 0, confidence: 0, latency: 0 });
     } catch (e) {
       console.error('Reset failed:', e);
     } finally {
@@ -49,7 +66,7 @@ export default function DemoControls() {
         onClick={() => setCollapsed((c) => !c)}
       >
         <span className="demo-controls__toggle-icon">{collapsed ? '▲' : '▼'}</span>
-        <span className="demo-controls__toggle-title">Failure Injection Controls</span>
+        <span className="demo-controls__toggle-title">Sensor Noise & Chaos Injection</span>
         {anyActive && <span className="demo-controls__toggle-badge">ACTIVE</span>}
       </button>
 
@@ -93,7 +110,7 @@ export default function DemoControls() {
               onClick={handleApply}
               disabled={sending}
             >
-              {sending ? 'Applying…' : '⚡ Apply'}
+              {sending ? 'Applying…' : '⚡ Apply Now'}
             </button>
             <button
               className="btn btn--reset"

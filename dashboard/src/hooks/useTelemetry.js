@@ -56,6 +56,10 @@ export function useTelemetryStream(pipelineId) {
               mean_confidence: m.mean_confidence,
               brightness: m.brightness,
               blur_score: m.blur_score,
+              noise_score: m.noise_score ?? 0,
+              noise_level: m.noise_level ?? 0,
+              has_anomaly: m.has_anomaly ?? false,
+              inference_time_ms: m.inference_time_ms ?? 0,
               timestamp: m.timestamp_ms,
               system: {
                 cpu_percent: 0, // placeholders until real system metrics arrive
@@ -73,6 +77,10 @@ export function useTelemetryStream(pipelineId) {
               mean_confidence: lastRow.mean_confidence,
               brightness: lastRow.brightness,
               blur_score: lastRow.blur_score,
+              noise_score: lastRow.noise_score ?? 0,
+              noise_level: lastRow.noise_level ?? 0,
+              has_anomaly: lastRow.has_anomaly ?? false,
+              inference_time_ms: lastRow.inference_time_ms ?? 0,
               timestamp: lastRow.timestamp_ms,
               system: {
                 cpu_percent: 0,
@@ -127,6 +135,10 @@ export function useTelemetryStream(pipelineId) {
                 mean_confidence: data.mean_confidence,
                 brightness: data.brightness,
                 blur_score: data.blur_score,
+                noise_score: data.noise_score ?? 0,
+                noise_level: data.noise_level ?? 0,
+                has_anomaly: data.has_anomaly ?? false,
+                inference_time_ms: data.inference_time_ms ?? 0,
                 timestamp: data.timestamp_ms,
               };
               if (!merged.system) {
@@ -142,6 +154,10 @@ export function useTelemetryStream(pipelineId) {
                 mean_confidence: data.mean_confidence,
                 brightness: data.brightness,
                 blur_score: data.blur_score,
+                noise_score: data.noise_score ?? 0,
+                noise_level: data.noise_level ?? 0,
+                has_anomaly: data.has_anomaly ?? false,
+                inference_time_ms: data.inference_time_ms ?? 0,
                 timestamp: data.timestamp_ms,
                 system: currentLatest?.system || { cpu_percent: 0, memory_percent: 0, gpu_percent: 0 },
               };

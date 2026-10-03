@@ -97,6 +97,24 @@ export async function resolveIncident(id) {
   return res.json();
 }
 
+export async function startPipeline({ input = 'visa:pcb1', fps = 10, loop = true, model = 'efficientad' } = {}) {
+  const res = await fetch(`${API_BASE}/api/pipeline/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input, fps, loop, model }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function stopPipeline() {
+  const res = await fetch(`${API_BASE}/api/pipeline/stop`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 export function getEvidenceUrl(incidentId, filename) {
   return `${API_BASE}/evidence/incidents/${incidentId}/${filename}`;
 }

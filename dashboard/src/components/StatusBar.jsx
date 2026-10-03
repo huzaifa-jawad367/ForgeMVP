@@ -3,11 +3,15 @@ import React, { useState, useEffect } from 'react';
 export default function StatusBar({ status, pipeline }) {
   const [elapsed, setElapsed] = useState('00:00:00');
 
-  /* Compute uptime from status.started_at */
+  /* Compute uptime from status.start_time or status.started_at */
   useEffect(() => {
-    if (!status?.started_at) return;
+    const startTime = status?.start_time || status?.started_at;
+    if (!startTime) {
+      setElapsed('00:00:00');
+      return;
+    }
     const tick = () => {
-      const start = new Date(status.started_at).getTime();
+      const start = new Date(startTime).getTime();
       const diff = Math.max(0, Date.now() - start);
       const h = String(Math.floor(diff / 3600000)).padStart(2, '0');
       const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0');
@@ -17,15 +21,15 @@ export default function StatusBar({ status, pipeline }) {
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [status?.started_at]);
+  }, [status?.start_time, status?.started_at]);
 
-  const isRunning = status?.status === 'running';
+  const isRunning = Boolean(status?.is_running ?? (status?.status === 'running'));
 
   /* Prefer pipeline metadata when available, fall back to API status */
-  const sourceName = pipeline?.source || status?.source_name || '—';
-  const sourceType = pipeline?.sourceType || status?.source_type || '—';
+  const sourceName = status?.source || pipeline?.source || status?.source_name || 'visa:pcb1';
+  const sourceType = pipeline?.sourceType || (status?.source?.startsWith('visa') ? 'conveyor stream' : 'stream');
   const framesProcessed = status?.frames_processed ?? 0;
-  const totalIncidents = status?.total_incidents ?? 0;
+  const totalIncidents = status?.incidents_total ?? status?.total_incidents ?? 0;
 
   return (
     <header className="status-bar">
