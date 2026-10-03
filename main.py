@@ -29,8 +29,9 @@ import cv2
 import numpy as np
 import psutil
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import PipelineStartInput, router
@@ -38,6 +39,11 @@ from app.api.state import DEGRADATION_STATE, PIPELINE_STATE
 from app.incidents.evidence_manager import EvidenceManager
 from app.incidents.incident_engine import IncidentEngine
 from app.incidents.trigger_rules import TriggerConfig
+from app.inference.efficientad_runner import EfficientADRunner
+from app.ingestion.dataset_stream_loader import (
+    VisaDatasetStreamLoader,
+    find_visa_root,
+)
 from app.storage.database import (
     get_session,
     init_db,
@@ -96,21 +102,100 @@ def _get_gpu_stats() -> Dict[str, Optional[float]]:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Global frame buffer for real-time live streaming
+# ---------------------------------------------------------------------------
+
+LATEST_FRAME_JPEG: Optional[bytes] = None
+LATEST_FRAME_LOCK = threading.Lock()
+
+
+def _update_live_stream_frame(
+    *,
+    frame: np.ndarray,
+    detections: list,
+    fps: float,
+    inference_time_ms: float,
+    frame_index: int,
+) -> None:
+    """Render bounding boxes, defect heatmaps, and HUD diagnostics into a JPEG for live streaming."""
+    global LATEST_FRAME_JPEG
+    annotated = frame.copy()
+    h, w = annotated.shape[:2]
+
+    # Draw detections (red for anomaly/defect, green for normal)
+    has_anomaly = False
+    for det in detections:
+        is_anom = "defect" in det.class_name.lower() or "anomaly" in det.class_name.lower()
+        if is_anom:
+            has_anomaly = True
+        color = (0, 0, 255) if is_anom else (0, 255, 0)
+        bx1, by1, bx2, by2 = [int(v) for v in det.bbox]
+        cv2.rectangle(annotated, (bx1, by1), (bx2, by2), color, 2)
+        label = f"{det.class_name.upper()} {det.confidence:.2f}"
+        cv2.putText(
+            annotated,
+            label,
+            (bx1, max(22, by1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    # Top HUD banner
+    banner_color = (0, 0, 160) if has_anomaly else (15, 15, 25)
+    cv2.rectangle(annotated, (0, 0), (w, 36), banner_color, -1)
+    status_tag = "● DEFECT DETECTED" if has_anomaly else "● INSPECTION OK"
+    status_col = (0, 0, 255) if has_anomaly else (0, 255, 120)
+
+    hud_str = f"FRAME #{frame_index:04d} | {fps:.1f} FPS | LAT: {inference_time_ms:.1f}ms"
+    noise_val = DEGRADATION_STATE.get("noise", 0.0)
+    blur_val = DEGRADATION_STATE.get("blur", 0.0)
+    if noise_val > 0:
+        hud_str += f" | NOISE: {noise_val * 100:.0f}%"
+    if blur_val > 0:
+        hud_str += f" | BLUR: {blur_val * 100:.0f}%"
+
+    cv2.putText(annotated, status_tag, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_col, 2, cv2.LINE_AA)
+    cv2.putText(annotated, hud_str, (240, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 240, 255), 1, cv2.LINE_AA)
+
+    ret, encoded = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if ret:
+        with LATEST_FRAME_LOCK:
+            LATEST_FRAME_JPEG = encoded.tobytes()
+
+
+# ---------------------------------------------------------------------------
+# Frame-level metric computation
+# ---------------------------------------------------------------------------
+
+
 def _compute_frame_metrics(
     frame: np.ndarray,
     detections: list,
     inference_time_ms: float,
     fps: float,
 ) -> Dict[str, Any]:
-    """Derive quality and detection metrics from a single frame."""
-
+    """Derive quality, sensor noise, and detection metrics from a single frame."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
     brightness = float(np.mean(gray))
     blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
+    # High-frequency residual standard deviation as a robust image noise estimate
+    blurred_gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    noise_std = float(np.std(cv2.absdiff(gray, blurred_gray)))
+    noise_level = float(DEGRADATION_STATE.get("noise", 0.0) * 100.0)
+
     confidences = [d.confidence for d in detections] if detections else []
     mean_conf = float(np.mean(confidences)) if confidences else 0.0
     min_conf = float(np.min(confidences)) if confidences else 0.0
+
+    has_anomaly = any(
+        "defect" in d.class_name.lower() or "anomaly" in d.class_name.lower()
+        for d in detections
+    )
 
     return {
         "fps": fps,
@@ -120,45 +205,55 @@ def _compute_frame_metrics(
         "num_detections": len(detections),
         "brightness": brightness,
         "blur_score": blur_score,
+        "noise_level": noise_level,
+        "noise_score": noise_std,
+        "has_anomaly": has_anomaly,
     }
 
 
 # ---------------------------------------------------------------------------
-# Degradation helpers
+# Degradation helpers (applied BEFORE inference for physical noise/blur)
 # ---------------------------------------------------------------------------
 
 
-def _apply_degradation(
-    frame: np.ndarray,
-    detections: list,
-) -> tuple:
-    """Mutate *frame* and *detections* according to ``DEGRADATION_STATE``."""
+def _apply_frame_degradation(frame: np.ndarray) -> np.ndarray:
+    """Mutate frame with sensor noise, blur, and lighting drops BEFORE inference."""
     blur_level = DEGRADATION_STATE.get("blur", 0.0)
     brightness_drop = DEGRADATION_STATE.get("brightness", 0.0)
-    conf_drop = DEGRADATION_STATE.get("confidence", 0.0)
+    noise_level = DEGRADATION_STATE.get("noise", 0.0)
     extra_latency = DEGRADATION_STATE.get("latency", 0.0)
 
-    # Blur – kernel size proportional to level (must be odd).
+    # 1. Sensor Gaussian Noise injection
+    if noise_level > 0:
+        sigma = float(noise_level * 55.0)
+        gauss = np.random.normal(0, sigma, frame.shape).astype(np.float32)
+        frame = np.clip(frame.astype(np.float32) + gauss, 0, 255).astype(np.uint8)
+
+    # 2. Defocus Blur
     if blur_level > 0:
         ksize = int(blur_level * 51) | 1  # ensure odd
         ksize = max(ksize, 3)
         frame = cv2.GaussianBlur(frame, (ksize, ksize), 0)
 
-    # Brightness reduction – scale pixel values down.
+    # 3. Brightness drop
     if brightness_drop > 0:
         factor = 1.0 - brightness_drop
         frame = np.clip(frame.astype(np.float32) * factor, 0, 255).astype(np.uint8)
 
-    # Confidence scaling – reduce each detection's confidence.
-    if conf_drop > 0:
-        for det in detections:
-            det.confidence *= (1.0 - conf_drop)
-
-    # Latency injection.
+    # 4. Latency injection
     if extra_latency > 0:
         time.sleep(extra_latency / 1000.0)
 
-    return frame, detections
+    return frame
+
+
+def _apply_confidence_degradation(detections: list) -> list:
+    """Scale down detection confidences if post-inference confidence degradation is active."""
+    conf_drop = DEGRADATION_STATE.get("confidence", 0.0)
+    if conf_drop > 0:
+        for det in detections:
+            det.confidence *= (1.0 - conf_drop)
+    return detections
 
 
 # ---------------------------------------------------------------------------
@@ -169,31 +264,56 @@ def _apply_degradation(
 _shutdown_event = threading.Event()
 
 
-def _run_pipeline_blocking(source_input: str) -> None:  # noqa: C901 (complexity)
+def _run_pipeline_blocking(
+    source_input: str,
+    target_fps: float = 10.0,
+    loop: bool = True,
+    model_name: Optional[str] = None,
+) -> None:  # noqa: C901 (complexity)
     """Blocking pipeline loop – meant to run in a daemon thread.
 
-    Handles three input types:
+    Handles four input types:
+    * **visa:<category>** – continuous conveyor-belt stream of VisA anomaly images
     * **file** – a local video file
     * **webcam** – an integer index (e.g. ``"0"``)
     * **stream** – an RTSP / HTTP URL
     * **directory** – a folder of image files
     """
-    logger.info("Pipeline starting with source: %s", source_input)
+    logger.info(
+        "Pipeline starting with source: %s (fps=%.1f, loop=%s, model=%s)",
+        source_input,
+        target_fps,
+        loop,
+        model_name,
+    )
 
     # -- Determine input type --------------------------------------------------
-    is_directory = os.path.isdir(source_input)
-    is_webcam = source_input.isdigit()
-    is_file = os.path.isfile(source_input)
+    is_visa = source_input.lower().startswith("visa")
+    is_directory = os.path.isdir(source_input) if not is_visa else False
+    is_webcam = source_input.isdigit() if not is_visa else False
+    is_file = os.path.isfile(source_input) if not is_visa else False
 
-    # -- Lazy-load the inference model ----------------------------------------
-    try:
-        from app.inference.model_wrapper import get_inference_model  # type: ignore[import]
-        model = get_inference_model()
-    except Exception:
-        logger.warning(
-            "Inference model not available – pipeline will run without detections."
-        )
-        model = None
+    # -- Model selection ------------------------------------------------------
+    model: Any = None
+    if is_visa or model_name == "efficientad":
+        cat = "pcb1"
+        if ":" in source_input:
+            cat = source_input.split(":", 1)[1].strip()
+        try:
+            logger.info("Initializing EfficientADRunner for VisA category '%s'...", cat)
+            model = EfficientADRunner(category=cat)
+        except Exception:
+            logger.exception("Failed to initialize EfficientADRunner, falling back to default model.")
+
+    if model is None:
+        try:
+            from app.inference.model_wrapper import get_inference_model  # type: ignore[import]
+            model = get_inference_model()
+        except Exception:
+            logger.warning(
+                "Inference model not available – pipeline will run without detections."
+            )
+            model = None
 
     # -- Initialise incident subsystem ----------------------------------------
     config = TriggerConfig()
@@ -211,9 +331,31 @@ def _run_pipeline_blocking(source_input: str) -> None:  # noqa: C901 (complexity
     last_frame_time = time.time()
 
     try:
-        if is_directory:
+        if is_visa:
+            cat = "pcb1"
+            if ":" in source_input:
+                cat = source_input.split(":", 1)[1].strip()
+            loader = VisaDatasetStreamLoader(category=cat, target_fps=target_fps, loop=loop)
+            try:
+                for stream_frame in loader.stream():
+                    if _shutdown_event.is_set():
+                        break
+                    _process_single_frame(
+                        frame=stream_frame.frame,
+                        frame_index=stream_frame.frame_index,
+                        timestamp_ms=stream_frame.timestamp_ms,
+                        fps=stream_frame.fps,
+                        source_input=source_input,
+                        model=model,
+                        evidence_mgr=evidence_mgr,
+                        incident_engine=incident_engine,
+                    )
+            finally:
+                loader.stop()
+
+        elif is_directory:
             _run_directory_pipeline(
-                source_input, model, config, evidence_mgr, incident_engine,
+                source_input, model, config, evidence_mgr, incident_engine, loop=loop
             )
         else:
             # Video file, webcam, or stream URL.
@@ -228,7 +370,11 @@ def _run_pipeline_blocking(source_input: str) -> None:  # noqa: C901 (complexity
             while not _shutdown_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
-                    if is_file:
+                    if is_file and loop:
+                        logger.info("End of video reached, rewinding to beginning.")
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
+                    elif is_file:
                         logger.info("End of video file reached.")
                         break
                     # For streams/webcams retry briefly.
@@ -269,8 +415,9 @@ def _run_directory_pipeline(
     config: TriggerConfig,
     evidence_mgr: EvidenceManager,
     incident_engine: IncidentEngine,
+    loop: bool = True,
 ) -> None:
-    """Process every image in *directory* sequentially."""
+    """Process every image in *directory* sequentially, optionally looping."""
     IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
     files = sorted(
         f
@@ -281,24 +428,30 @@ def _run_directory_pipeline(
         logger.warning("No image files found in %s", directory)
         return
 
-    for idx, fname in enumerate(files):
-        if _shutdown_event.is_set():
-            break
-        fpath = os.path.join(directory, fname)
-        frame = cv2.imread(fpath)
-        if frame is None:
-            continue
+    frame_counter = 0
+    while not _shutdown_event.is_set():
+        for fname in files:
+            if _shutdown_event.is_set():
+                break
+            fpath = os.path.join(directory, fname)
+            frame = cv2.imread(fpath)
+            if frame is None:
+                continue
 
-        _process_single_frame(
-            frame=frame,
-            frame_index=idx,
-            timestamp_ms=float(idx * 33),  # synthetic ~30fps timing
-            fps=30.0,
-            source_input=directory,
-            model=model,
-            evidence_mgr=evidence_mgr,
-            incident_engine=incident_engine,
-        )
+            _process_single_frame(
+                frame=frame,
+                frame_index=frame_counter,
+                timestamp_ms=float(frame_counter * 33),  # synthetic ~30fps timing
+                fps=30.0,
+                source_input=directory,
+                model=model,
+                evidence_mgr=evidence_mgr,
+                incident_engine=incident_engine,
+            )
+            frame_counter += 1
+            time.sleep(0.033)
+        if not loop:
+            break
 
 
 @dataclass
@@ -333,41 +486,53 @@ def _process_single_frame(
     evidence_mgr: EvidenceManager,
     incident_engine: IncidentEngine,
 ) -> None:
-    """Run a single frame through inference → metrics → incidents → DB."""
+    """Run a single frame through degradation → inference → metrics → incidents → DB."""
 
-    # 1. Run inference (or use empty detections).
+    # 1. Physical sensor noise, blur, and lighting degradation BEFORE inference!
+    frame = _apply_frame_degradation(frame)
+
+    # 2. Run inference on degraded frame
     if model is not None:
         try:
             inference_result = model.predict(frame)
             detections = inference_result.detections
             inference_time_ms = inference_result.inference_time_ms
         except Exception:
-            logger.debug("Inference failed on frame %d", frame_index)
+            logger.debug("Inference failed on frame %d", frame_index, exc_info=True)
             detections = []
             inference_time_ms = 0.0
     else:
         detections = []
         inference_time_ms = 0.0
 
-    # 2. Apply degradation.
-    frame, detections = _apply_degradation(frame, detections)
+    # 3. Post-inference confidence degradation if configured
+    detections = _apply_confidence_degradation(detections)
 
-    # 3. Compute frame-level metrics.
+    # 4. Render overlay for live streaming buffer
+    _update_live_stream_frame(
+        frame=frame,
+        detections=detections,
+        fps=fps,
+        inference_time_ms=inference_time_ms,
+        frame_index=frame_index,
+    )
+
+    # 5. Compute frame-level metrics.
     frame_metrics = _compute_frame_metrics(frame, detections, inference_time_ms, fps)
     frame_metrics["current_fps"] = fps
     frame_metrics["seconds_since_last_frame"] = 1.0 / fps if fps > 0 else 0.0
 
-    # 4. System metrics.
+    # 6. System metrics.
     system_metrics: Dict[str, Any] = {
         "cpu_percent": psutil.cpu_percent(interval=None),
         "memory_percent": psutil.virtual_memory().percent,
         **_get_gpu_stats(),
     }
 
-    # 5. Push frame into evidence ring buffer.
+    # 7. Push frame into evidence ring buffer.
     evidence_mgr.push_frame(frame, frame_index, timestamp_ms)
 
-    # 6. Feed incident engine.
+    # 8. Feed incident engine.
     frame_data = _FakeFrameData(
         frame=frame,
         frame_index=frame_index,
@@ -384,7 +549,7 @@ def _process_single_frame(
         frame_data, inf_result, frame_metrics, system_metrics
     )
 
-    # 7. Persist to database.
+    # 9. Persist to database.
     try:
         with get_session() as session:
             store_frame_metric(session, {
@@ -398,6 +563,7 @@ def _process_single_frame(
                 "num_detections": frame_metrics["num_detections"],
                 "brightness": frame_metrics["brightness"],
                 "blur_score": frame_metrics["blur_score"],
+                "noise_score": frame_metrics["noise_score"],
             })
             store_system_metric(session, system_metrics)
 
@@ -409,7 +575,7 @@ def _process_single_frame(
         logger.exception("Database write failed on frame %d", frame_index)
         stored_incidents = []
 
-    # 7.5. Export telemetry.
+    # 10. Export telemetry.
     try:
         from app.api.routes import _incident_to_dict
 
@@ -425,6 +591,9 @@ def _process_single_frame(
             "num_detections": frame_metrics["num_detections"],
             "brightness": frame_metrics["brightness"],
             "blur_score": frame_metrics["blur_score"],
+            "noise_level": frame_metrics["noise_level"],
+            "noise_score": frame_metrics["noise_score"],
+            "has_anomaly": frame_metrics["has_anomaly"],
         })
 
         telemetry_manager.export_system_metrics(system_metrics)
@@ -434,17 +603,18 @@ def _process_single_frame(
     except Exception:
         logger.exception("Telemetry export failed on frame %d", frame_index)
 
-    # 8. Update pipeline state.
+    # 11. Update pipeline state.
     PIPELINE_STATE["frames_processed"] = frame_index + 1
     PIPELINE_STATE["incidents_total"] += len(new_incidents)
 
-    if frame_index % 100 == 0:
+    if frame_index % 25 == 0:
         logger.info(
-            "Frame %d | fps=%.1f | detections=%d | conf=%.3f | blur=%.1f",
+            "Frame %d | fps=%.1f | detections=%d | conf=%.3f | noise=%.1f | blur=%.1f",
             frame_index,
             fps,
             frame_metrics["num_detections"],
             frame_metrics["mean_confidence"],
+            frame_metrics["noise_level"],
             frame_metrics["blur_score"],
         )
 
@@ -516,9 +686,11 @@ def create_app() -> FastAPI:
         if PIPELINE_STATE["is_running"]:
             return {"status": "already_running", "source": PIPELINE_STATE["source"]}
 
+        _shutdown_event.clear()
+        target_fps = body.fps if body.fps is not None else 10.0
         thread = threading.Thread(
             target=_run_pipeline_blocking,
-            args=(body.input,),
+            args=(body.input, target_fps, body.loop, body.model),
             daemon=True,
             name="forge-pipeline",
         )
@@ -526,7 +698,55 @@ def create_app() -> FastAPI:
 
         # Give the thread a moment to update state.
         await asyncio.sleep(0.2)
-        return {"status": "started", "source": body.input}
+        return {
+            "status": "started",
+            "source": body.input,
+            "fps": target_fps,
+            "loop": body.loop,
+            "model": body.model,
+        }
+
+    # -- Pipeline stop endpoint ---------------------------------------------
+    @app.post("/api/pipeline/stop", tags=["Pipeline"])
+    async def stop_pipeline() -> Any:
+        """Stop the currently running computer-vision pipeline."""
+        if not PIPELINE_STATE["is_running"]:
+            return {"status": "not_running"}
+        _shutdown_event.set()
+        PIPELINE_STATE["is_running"] = False
+        return {"status": "stopping"}
+
+    # -- Live MJPEG stream endpoint -----------------------------------------
+    @app.get("/api/stream/live", tags=["Streaming"])
+    async def live_video_stream():
+        """MJPEG video stream endpoint for real-time frontend monitoring."""
+        async def frame_generator():
+            while not _shutdown_event.is_set():
+                with LATEST_FRAME_LOCK:
+                    frame_bytes = LATEST_FRAME_JPEG
+                if frame_bytes is not None:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+                    )
+                    await asyncio.sleep(0.04)  # ~25 fps max poll
+                else:
+                    await asyncio.sleep(0.1)
+
+        return StreamingResponse(
+            frame_generator(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    # -- Snapshot JPEG endpoint ---------------------------------------------
+    @app.get("/api/stream/frame", tags=["Streaming"])
+    async def latest_frame_snapshot():
+        """Return the latest single JPEG snapshot."""
+        with LATEST_FRAME_LOCK:
+            frame_bytes = LATEST_FRAME_JPEG
+        if frame_bytes is None:
+            raise HTTPException(status_code=404, detail="No frame available yet")
+        return Response(content=frame_bytes, media_type="image/jpeg")
 
     # -- Static file mount for evidence images ------------------------------
     os.makedirs("outputs", exist_ok=True)
@@ -535,6 +755,20 @@ def create_app() -> FastAPI:
         StaticFiles(directory="outputs"),
         name="evidence",
     )
+
+    # -- Mount dashboard SPA if built ---------------------------------------
+    dist_dir = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
+    if os.path.isdir(dist_dir):
+        assets_dir = os.path.join(dist_dir, "assets")
+        if os.path.isdir(assets_dir):
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str):
+            target = os.path.join(dist_dir, full_path)
+            if full_path and os.path.isfile(target):
+                return FileResponse(target)
+            return FileResponse(os.path.join(dist_dir, "index.html"))
 
     return app
 
@@ -552,24 +786,60 @@ def main() -> None:
         "--input",
         type=str,
         default=None,
-        help="Path to video file, image directory, stream URL, or webcam index (e.g. 0).",
+        help="Path to video file, image directory, stream URL, webcam index, or visa:category (e.g. visa:pcb1).",
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=10.0,
+        help="Target frames per second for stream playback/processing (default: 10.0).",
+    )
+    parser.add_argument(
+        "--loop",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Loop dataset or video stream indefinitely (default: True).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Inference model to use: efficientad or mock (default: auto).",
+    )
+    parser.add_argument(
+        "--noise",
+        type=float,
+        default=0.0,
+        help="Initial sensor noise level (0.0 to 1.0).",
     )
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Bind address.")
     parser.add_argument("--port", type=int, default=8000, help="Bind port.")
     args = parser.parse_args()
 
+    # Pre-configure degradation if requested on CLI
+    if args.noise > 0.0:
+        DEGRADATION_STATE["noise"] = float(args.noise)
+        logger.info("Initial sensor noise level set to: %.2f", args.noise)
+
     app = create_app()
 
     # If a source is provided on the CLI, start the pipeline in background.
     if args.input:
+        _shutdown_event.clear()
         pipeline_thread = threading.Thread(
             target=_run_pipeline_blocking,
-            args=(args.input,),
+            args=(args.input, args.fps, args.loop, args.model),
             daemon=True,
             name="forge-pipeline",
         )
         pipeline_thread.start()
-        logger.info("Pipeline thread launched for: %s", args.input)
+        logger.info(
+            "Pipeline thread launched for: %s (fps=%.1f, loop=%s, model=%s)",
+            args.input,
+            args.fps,
+            args.loop,
+            args.model,
+        )
 
     # Run the API server (blocks until Ctrl+C).
     try:

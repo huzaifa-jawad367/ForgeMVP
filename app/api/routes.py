@@ -63,16 +63,20 @@ class SourceOut(BaseModel):
 class DegradationInput(BaseModel):
     """Body for ``POST /api/demo/degrade``."""
 
-    blur: float = Field(0.0, ge=0.0, le=1.0)
-    brightness: float = Field(0.0, ge=0.0, le=1.0)
-    confidence: float = Field(0.0, ge=0.0, le=1.0)
-    latency: float = Field(0.0, ge=0.0, le=100.0)
+    blur: float = Field(0.0, ge=0.0, le=100.0)
+    brightness: float = Field(0.0, ge=0.0, le=100.0)
+    noise: float = Field(0.0, ge=0.0, le=100.0)
+    confidence: float = Field(0.0, ge=0.0, le=100.0)
+    latency: float = Field(0.0, ge=0.0, le=5000.0)
 
 
 class PipelineStartInput(BaseModel):
     """Body for ``POST /api/pipeline/start``."""
 
-    input: str  # path, URL, or webcam index
+    input: str  # path, URL, webcam index, or visa:category (e.g. visa:pcb1)
+    loop: bool = True
+    fps: Optional[float] = 10.0
+    model: Optional[str] = None
 
 
 # =========================================================================
@@ -261,9 +265,10 @@ def demo_status() -> Any:
 @router.post("/api/demo/degrade", tags=["Demo"])
 def demo_degrade(body: DegradationInput) -> Any:
     """Apply degradation settings used by the pipeline in real time."""
-    DEGRADATION_STATE["blur"] = body.blur
-    DEGRADATION_STATE["brightness"] = body.brightness
-    DEGRADATION_STATE["confidence"] = body.confidence
+    DEGRADATION_STATE["blur"] = body.blur / 100.0 if body.blur > 1.0 else body.blur
+    DEGRADATION_STATE["brightness"] = body.brightness / 100.0 if body.brightness > 1.0 else body.brightness
+    DEGRADATION_STATE["noise"] = body.noise / 100.0 if body.noise > 1.0 else body.noise
+    DEGRADATION_STATE["confidence"] = body.confidence / 100.0 if body.confidence > 1.0 else body.confidence
     DEGRADATION_STATE["latency"] = body.latency
     return {"status": "applied", **dict(DEGRADATION_STATE)}
 

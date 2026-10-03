@@ -97,6 +97,7 @@ class FrameMetric(Base):
     num_detections: int = Column(Integer, nullable=False, default=0)
     brightness: float = Column(Float, nullable=False, default=0.0)
     blur_score: float = Column(Float, nullable=False, default=0.0)
+    noise_score: Optional[float] = Column(Float, nullable=True, default=0.0)
     created_at: datetime = Column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
     )
@@ -145,8 +146,19 @@ class Incident(Base):
 
 
 def init_db() -> None:
-    """Create all tables that do not yet exist."""
+    """Create all tables that do not yet exist, and migrate missing columns."""
     Base.metadata.create_all(bind=engine)
+
+    try:
+        with engine.connect() as conn:
+            cursor = conn.connection.cursor()
+            cursor.execute("PRAGMA table_info(frame_metrics)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            if "noise_score" not in existing_cols:
+                cursor.execute("ALTER TABLE frame_metrics ADD COLUMN noise_score FLOAT DEFAULT 0.0")
+                conn.connection.commit()
+    except Exception as e:
+        logger.warning("Database schema migration check failed (non-fatal): %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +201,9 @@ def store_frame_metric(session: Session, data: Dict[str, Any]) -> FrameMetric:
     Returns:
         The persisted ORM instance.
     """
-    metric = FrameMetric(**data)
+    valid_cols = {c.name for c in FrameMetric.__table__.columns}
+    payload = {k: v for k, v in data.items() if k in valid_cols}
+    metric = FrameMetric(**payload)
     session.add(metric)
     session.flush()
     return metric

@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 DEGRADATION_STATE: Dict[str, float] = {
     "blur": 0.0,        # 0.0 = no blur, 1.0 = max blur
     "brightness": 0.0,  # 0.0 = normal, 1.0 = fully dark
+    "noise": 0.0,       # 0.0 = clean, 1.0 = heavy sensor noise
     "confidence": 0.0,  # 0.0 = normal, 1.0 = drop to zero
     "latency": 0.0,     # extra milliseconds to inject
 }
