@@ -23,8 +23,10 @@ import numpy as np
 import psutil
 
 from app.edge.buffer import EdgeBuffer, EdgePayload
+from app.edge.privacy import redact_worker_pii
 from app.inference.efficientad_runner import EfficientADRunner
 from app.ingestion.dataset_stream_loader import VisaDatasetStreamLoader
+from app.schema.contracts import PrivacyPayload
 
 logger = logging.getLogger("forge.edge")
 
@@ -291,10 +293,13 @@ class EdgeService:
                 measured_fps = 1.0 / elapsed
             last_frame_time = now
 
-            # 2. Physical noise injection
+            # 2. Pre-Persistence Worker PII Redaction
+            frame, was_redacted = redact_worker_pii(frame)
+
+            # 3. Physical noise injection
             degraded_frame = self._apply_degradation(frame)
 
-            # 3. Model inference on edge
+            # 4. Model inference on edge
             detections = []
             inference_time_ms = 0.0
             if self.model is not None:
@@ -337,10 +342,11 @@ class EdgeService:
                 for d in detections
             ]
 
-            # 7. Collect edge system metrics
+            # 8. Collect edge system metrics
             sys_metrics = _get_hardware_telemetry()
 
-            # 8. Create payload and push to edge buffer
+            # 9. Create payload and push to edge buffer
+            privacy_payload: PrivacyPayload = {"pii_redacted": True, "redaction_method": "in_memory_gaussian_roi"} if was_redacted else {"pii_redacted": False, "redaction_method": "none"}
             payload = EdgePayload(
                 payload_id=str(uuid.uuid4()),
                 frame_index=frame_counter,
@@ -357,6 +363,7 @@ class EdgeService:
                 noise_score=noise_std,
                 has_anomaly=has_anomaly,
                 system_metrics=sys_metrics,
+                privacy=privacy_payload,
                 frame_jpeg_b64=jpeg_b64 if frame_counter % 2 == 0 else None,  # Sync keyframes regularly
             )
             self.buffer.push(payload)

@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.schema.contracts import PrivacyPayload
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,7 @@ class EdgePayload:
     noise_score: float = 0.0
     has_anomaly: bool = False
     system_metrics: Dict[str, Any] = field(default_factory=dict)
+    privacy: Optional[PrivacyPayload] = None
     frame_jpeg_b64: Optional[str] = None
     created_at: float = field(default_factory=time.time)
 
