@@ -2,8 +2,6 @@
 
 **Forge** is an Edge-to-Cloud Computer Vision Observability & Incident Detection Platform designed specifically for real-world industrial computer vision deployments (automated optical inspection, conveyor belts, assembly lines).
 
-For detailed architecture diagrams and system specifications, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
 ---
 
 ## 1. Core Intentions & Problem Statement
@@ -71,35 +69,76 @@ To ground this in reality, Forge uses:
   └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Flow Diagram
+
+```mermaid
+flowchart TD
+    subgraph EdgeNode["Service 1: Industrial Edge (edge_service.py)"]
+        Cam["VisA Stream / Industrial Camera"] --> Degrade["Physical Degradation Engine\n(Gaussian Noise, Blur, Lighting Drop)"]
+        Degrade --> Model["EfficientAD Medium PCB1 Inference"]
+        Model --> HUD["HUD Annotation & Bounding Boxes"]
+        HUD --> EdgeBuf["EdgeBuffer\n(Thread-Safe FIFO + SQLite Disk Backup)"]
+    end
+
+    subgraph CentralBackend["Service 2: Central Backend (main.py / app/api/)"]
+        SyncAPI["/api/edge/sync Endpoint"]
+        Relay["MJPEG Live Video Relay\n(/api/stream/live)"]
+        Incidents["IncidentEngine &\nEvidenceManager"]
+        Storage[("SQLite Database\n(Metrics, Hardware, Incidents)")]
+        WSBroadcaster["WebSocket Broadcaster\n(/ws/telemetry)"]
+    end
+
+    subgraph FrontendUI["Service 3: Frontend Dashboard (React + Vite)"]
+        StatusBar["StatusBar\n(Active Node, Queue Depth, Sync Status)"]
+        VideoHUD["LiveStreamViewer\n(MJPEG Stream + Live Diagnostic HUD)"]
+        Charts["MetricsPanel\n(FPS, Anomaly vs 0.50, Noise, GPU/CPU)"]
+        Alerts["IncidentFeed & Modal\n(Forensic Snapshots, Root Cause)"]
+        Chaos["DemoControls\n(Remote Noise & Blur Injection Sliders)"]
+    end
+
+    EdgeBuf -- "HTTP POST (Batched frames + Keyframe JPEG + Buffer stats)" --> SyncAPI
+    SyncAPI -- "HTTP 200 Ack + Dynamic Chaos Controls (Noise/Blur)" --> EdgeBuf
+    SyncAPI --> Relay
+    SyncAPI --> Incidents
+    SyncAPI --> Storage
+    Incidents --> WSBroadcaster
+    Storage --> WSBroadcaster
+    Relay -- "MJPEG Stream" --> VideoHUD
+    WSBroadcaster -- "Sub-second Telemetry" --> StatusBar
+    WSBroadcaster -- "Metrics & Events" --> Charts
+    WSBroadcaster -- "Incident Alerts" --> Alerts
+    Chaos -- "HTTP POST /api/controls/degradation" --> SyncAPI
+```
+
 ---
 
 ## 3. Deep Dive: The 3 Services
 
-### Service 1: Forge Edge Node ([`edge_service.py`](edge_service.py) & [`app/edge/`](app/edge/))
+### Service 1: Forge Edge Node ([`edge_service.py`](../edge_service.py) & [`app/edge/`](../app/edge/))
 
 Runs beside the inspection camera and handles:
 
 - **Sensor Ingestion & Chaos Simulation:** Ingests conveyor frames. Supports pre-inference physical degradations (Gaussian sensor noise, defocus blur, lighting drops, camera latency).
 - **EfficientAD Inference:** Computes anomaly heatmaps, confidence thresholds ($0.50$), and defect bounding boxes.
-- **Resilient [`EdgeBuffer`](app/edge/buffer.py):**
+- **Resilient [`EdgeBuffer`](../app/edge/buffer.py):**
   - Thread-safe FIFO queue with capacity limits and drop tracking.
   - **Peek/Ack leasing pattern:** frames stay in the buffer until the backend sends HTTP 200.
   - **SQLite persistence (`outputs/edge_buffer.db`):** buffers survive edge service restarts or power outages.
 - **Bi-Directional Sync Worker:** Batches frames and POSTs to `/api/edge/sync`. Reads backend response controls to update local physical degradation parameters on the fly.
 - **Offline Resilience:** If the backend is unreachable, the edge buffer retains all frames without crashing and drains automatically upon reconnection.
 
-### Service 2: Forge Backend ([`main.py`](main.py) & [`app/api/`](app/api/))
+### Service 2: Forge Backend ([`main.py`](../main.py) & [`app/api/`](../app/api/))
 
 Central hub connecting edge deployments to user interfaces:
 
 - **Edge Ingestion Pipeline:** Validates incoming sync batches, registers edge node heartbeats, updates `EDGE_STATE`, and returns active chaos settings.
-- **Incident Engine ([`app/incidents/incident_engine.py`](app/incidents/incident_engine.py)):** Rule engine checking consecutive anomalies, low confidence, sensor degradation, and latency drops. Triggers structured incidents with pre/post incident evidence frames saved to disk.
+- **Incident Engine ([`app/incidents/incident_engine.py`](../app/incidents/incident_engine.py)):** Rule engine checking consecutive anomalies, low confidence, sensor degradation, and latency drops. Triggers structured incidents with pre/post incident evidence frames saved to disk.
 - **Hardware Telemetry:** Direct NVML integration to monitor GPU utilization, VRAM usage, and GPU temperature alongside CPU/memory.
 - **Live Video Relay:** Exposes `/api/stream/live` (MJPEG) and `/api/stream/frame` (JPEG snapshot) decoded from edge keyframe payloads.
 - **WebSocket Telemetry:** Broadcasts synchronized frame metrics and incidents over `/ws/telemetry`.
 - **Static & SPA Server:** Serves compiled React dashboard bundle and handles SPA deep-link routing.
 
-### Service 3: Frontend Dashboard ([`dashboard/`](dashboard/))
+### Service 3: Frontend Dashboard ([`dashboard/`](../dashboard/))
 
 High-density React + Vite + Recharts observability UI:
 
@@ -118,7 +157,7 @@ High-density React + Vite + Recharts observability UI:
 
 ## 4. Verification & Testing
 
-The architecture is covered by an automated test suite in [`tests/test_three_services.py`](tests/test_three_services.py):
+The architecture is covered by an automated test suite in [`tests/test_three_services.py`](../tests/test_three_services.py):
 
 - **Buffer Semantics:** FIFO order, capacity limits, drop accounting, and SQLite persistence across restarts.
 - **Edge Physical Degradation:** Verification that Gaussian noise and blur alter image statistics prior to inference.
@@ -135,13 +174,9 @@ The architecture is covered by an automated test suite in [`tests/test_three_ser
 
 ---
 
-## 5. MVP End-State Goals & Compliance
+## 5. Next Steps & Target End-State
 
-For the formal specification of the final MVP acceptance criteria, failure resilience matrix, and European privacy-by-design standards, see:
+To view the complete engineering acceptance criteria, failure resilience specifications, and European privacy-by-design requirements, consult:
 
-👉 **[`docs/MVP_SPEC.md`](docs/MVP_SPEC.md) — MVP End-State Requirements & Reliability Specification**
-
-- **Industrial Reliability:** Zero P0 incident data loss during network partitions, durable SQLite buffering with two-phase lease-ack, idempotent deduplicated synchronization, and 7-subsystem failure attribution.
-- **European Privacy-by-Design:** Edge-side pre-persistence worker PII redaction, strict data minimization (defect ROIs only, zero continuous raw video persistence), anti-surveillance guarantees (Works Council / *Betriebsrat* compliance), and automated 72h/30d TTL data vacuuming.
-- **10-Step Acceptance Protocol:** End-to-end multi-service failure-injection and forensic recovery verification.
+👉 **[`MVP_SPEC.md`](MVP_SPEC.md)**
 

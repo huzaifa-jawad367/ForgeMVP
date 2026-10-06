@@ -1,13 +1,13 @@
 # FORGE — MVP Implementation Roadmap & Stage Breakdown
 
-> **Reference Specification:** [`MVP_SPEC.md`](MVP_SPEC.md)  
+> **Reference Specification:** [`docs/MVP_SPEC.md`](docs/MVP_SPEC.md)  
 > **Guiding Principle:** Every phase transitions Forge closer to a production-grade industrial failure-explanation system compliant with industrial reliability and European privacy-by-design standards.
 
 ---
 
 ## 1. Executive Summary: The 3-Stage Delivery Model
 
-To maximize development velocity while maintaining strict architectural decoupling, the remaining work from [`MVP_SPEC.md`](MVP_SPEC.md) is structured into **3 Sequential Stages** comprising **6 Epics** and **9 discrete Pull Requests (PRs)**:
+To maximize development velocity while maintaining strict architectural decoupling, the remaining work from [`docs/MVP_SPEC.md`](docs/MVP_SPEC.md) is structured into **3 Sequential Stages** comprising **6 Epics** and **9 discrete Pull Requests (PRs)**:
 
 *   **⚡ Stage 1 (Parallel Foundations & Core Capabilities):** **Epics 1, 2, 4, and 5**  
     *Can be developed completely in parallel.* These four epics touch orthogonal components with zero file conflicts: the edge-to-backend wire protocol (Epic 1), the incident root-cause classifier & UI (Epic 2), the edge worker PII redaction filter (Epic 4), and the database TTL cleanup worker (Epic 5).
@@ -262,5 +262,5 @@ flowchart TD
 * **Commit format:** Conventional Commits (`feat(...)`, `fix(...)`, `test(...)`, `docs(...)`)
 * **PR Policy:** Every PR must include:
   1. Dedicated unit and/or integration tests for the new functionality.
-  2. Updates to the corresponding checkbox in `ROADMAP.md` and `MVP_SPEC.md`.
+  2. Updates to the corresponding checkbox in `ROADMAP.md` and `docs/MVP_SPEC.md`.
   3. Clean execution of `unittest` suite before merge.
