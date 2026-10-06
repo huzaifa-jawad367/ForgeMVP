@@ -1707,3 +1707,175 @@
   margin-left: auto;
 }
 
+/* ────────────────────────────────────────────
+   EDGE OBSERVABILITY STYLES
+   ──────────────────────────────────────────── */
+
+.edge-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  transition: all 0.3s ease;
+}
+
+.edge-badge--online {
+  background: rgba(0, 240, 255, 0.08);
+  border: 1px solid rgba(0, 240, 255, 0.25);
+  color: var(--cyan);
+}
+
+.edge-badge--offline {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+}
+
+.edge-badge__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.edge-badge--online .edge-badge__dot {
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan);
+  animation: dotPulse 2s ease-in-out infinite;
+}
+
+.edge-badge--offline .edge-badge__dot {
+  background: var(--text-dim);
+}
+
+.edge-badge__buffer {
+  font-size: 10px;
+  padding: 1px 6px;
+  background: rgba(0, 240, 255, 0.15);
+  border-radius: 4px;
+  color: var(--cyan);
+  letter-spacing: 0.5px;
+}
+
+.edge-badge__buffer--warning {
+  background: rgba(255, 184, 0, 0.2);
+  color: var(--amber);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.live-stream-card__edge-tag {
+  font-size: 11px;
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.08);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  padding: 3px 8px;
+  border-radius: 6px;
+  letter-spacing: 0.5px;
+}
+
+.hud-metric--edge .hud-metric__val {
+  color: #a78bfa;
+}
+
+.hud-metric--buffer .hud-metric__val {
+  color: var(--cyan);
+}
+
+/* Edge metrics card in MetricsPanel */
+.edge-metrics-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.edge-metrics-card:hover {
+  border-color: rgba(0, 240, 255, 0.2);
+  box-shadow: 0 0 20px rgba(0, 240, 255, 0.04);
+}
+
+.edge-metrics-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.edge-metrics-card__title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.edge-metrics-card__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.edge-metrics-card__dot--active {
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan);
+  animation: dotPulse 2s ease-in-out infinite;
+}
+
+.edge-metrics-card__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.edge-metrics-card__badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0, 240, 255, 0.08);
+  border: 1px solid rgba(0, 240, 255, 0.2);
+  color: var(--cyan);
+}
+
+.edge-metrics-card__body {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.edge-metric-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: var(--radius-sm);
+}
+
+.edge-metric-item__label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.edge-metric-item__value {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.edge-metric-item__unit {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+

@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { useEdgeStatus } from '../hooks/useForgeApi';
 
 export default function StatusBar({ status, pipeline }) {
   const [elapsed, setElapsed] = useState('00:00:00');
+  const { data: edgeStatus } = useEdgeStatus();
+  const isEdgeConnected = Boolean(edgeStatus?.is_connected);
 
   /* Compute uptime from status.start_time or status.started_at */
   useEffect(() => {
@@ -51,6 +54,24 @@ export default function StatusBar({ status, pipeline }) {
 
         <div className="status-bar__divider" />
 
+        {/* Edge Node Status Badge */}
+        <div className={`edge-badge ${isEdgeConnected ? 'edge-badge--online' : 'edge-badge--offline'}`}>
+          <span className="edge-badge__dot" />
+          <span className="edge-badge__label">
+            {isEdgeConnected ? `EDGE: ${edgeStatus?.edge_id || 'ONLINE'}` : 'EDGE: OFFLINE'}
+          </span>
+          {isEdgeConnected && (
+            <span
+              className={`edge-badge__buffer mono ${(edgeStatus?.queue_size ?? 0) > 10 ? 'edge-badge__buffer--warning' : ''}`}
+              title="Frames buffered at edge waiting to sync"
+            >
+              BUF: {edgeStatus?.queue_size ?? 0}
+            </span>
+          )}
+        </div>
+
+        <div className="status-bar__divider" />
+
         <div className="source-info">
           <span className="source-info__label">SOURCE</span>
           <span className="source-info__value">{sourceName}</span>
@@ -72,6 +93,13 @@ export default function StatusBar({ status, pipeline }) {
 
       {/* Right cluster */}
       <div className="status-bar__right">
+        {isEdgeConnected && (
+          <div className="metric-chip">
+            <span className="metric-chip__label">EDGE SYNCED</span>
+            <span className="metric-chip__value mono">{(edgeStatus?.total_synced ?? 0).toLocaleString()}</span>
+          </div>
+        )}
+
         <div className="metric-chip">
           <span className="metric-chip__label">FRAMES</span>
           <span className="metric-chip__value mono">{framesProcessed.toLocaleString()}</span>

@@ -56,6 +56,11 @@ export default function LiveStreamViewer({ pipeline, latestMetrics, pipelineStat
           <span className="live-stream-card__model-tag mono">
             {pipeline?.model || 'EfficientAD Medium · PCB1'}
           </span>
+          {latestMetrics?.edge_id && (
+            <span className="live-stream-card__edge-tag mono" title="Inference running on Edge Node">
+              EDGE: {latestMetrics.edge_id}
+            </span>
+          )}
         </div>
 
         <div className="live-stream-card__actions">
@@ -169,6 +174,22 @@ export default function LiveStreamViewer({ pipeline, latestMetrics, pipelineStat
                 <span className="hud-metric__label">SENSOR NOISE</span>
                 <span className="hud-metric__val mono" style={{ color: 'var(--amber)' }}>
                   {noiseLevel.toFixed(0)}%
+                </span>
+              </div>
+            )}
+            {latestMetrics?.edge_id && (
+              <div className="hud-metric hud-metric--edge">
+                <span className="hud-metric__label">EDGE NODE</span>
+                <span className="hud-metric__val mono" style={{ color: 'var(--cyan)' }}>
+                  {latestMetrics.edge_id}
+                </span>
+              </div>
+            )}
+            {latestMetrics?.edge_buffer_size !== undefined && (
+              <div className="hud-metric hud-metric--buffer">
+                <span className="hud-metric__label">EDGE QUEUE</span>
+                <span className="hud-metric__val mono" style={{ color: latestMetrics.edge_buffer_size > 15 ? 'var(--amber)' : 'var(--text-bright)' }}>
+                  {latestMetrics.edge_buffer_size}
                 </span>
               </div>
             )}

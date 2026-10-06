@@ -61,6 +61,10 @@ export function usePipelineStatus() {
   return usePolling('/api/pipeline/status', 2000);
 }
 
+export function useEdgeStatus() {
+  return usePolling('/api/edge/status', 1000);
+}
+
 export function useIncidentEvidence(incidentId) {
   return usePolling(
     `/api/incidents/${incidentId}/evidence`,

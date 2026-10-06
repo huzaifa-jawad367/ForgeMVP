@@ -259,6 +259,45 @@ export default function MetricsPanel({ metricsHistory, latestMetrics }) {
           />
         </div>
       </div>
+
+      {/* ── Edge Node & Buffer Resilience ── */}
+      <div className="edge-metrics-card fade-in" style={{ animationDelay: '0.3s' }}>
+        <div className="edge-metrics-card__header">
+          <div className="edge-metrics-card__title-group">
+            <span className={`edge-metrics-card__dot ${latest.edge_id ? 'edge-metrics-card__dot--active' : ''}`} />
+            <h3 className="edge-metrics-card__title">Edge Buffer & Sync Health</h3>
+          </div>
+          <span className="edge-metrics-card__badge mono">
+            {latest.edge_id ? `NODE: ${latest.edge_id}` : 'STANDBY'}
+          </span>
+        </div>
+        <div className="edge-metrics-card__body">
+          <div className="edge-metric-item">
+            <span className="edge-metric-item__label">EDGE QUEUE</span>
+            <span
+              className="edge-metric-item__value mono"
+              style={{ color: (latest.edge_buffer_size ?? 0) > 20 ? 'var(--amber)' : 'var(--cyan)' }}
+            >
+              {latest.edge_buffer_size ?? 0}
+              <span className="edge-metric-item__unit"> frames</span>
+            </span>
+          </div>
+          <div className="edge-metric-item">
+            <span className="edge-metric-item__label">SYNCED TOTAL</span>
+            <span className="edge-metric-item__value mono" style={{ color: 'var(--green)' }}>
+              {(latest.edge_total_synced ?? 0).toLocaleString()}
+              <span className="edge-metric-item__unit"> pkts</span>
+            </span>
+          </div>
+          <div className="edge-metric-item">
+            <span className="edge-metric-item__label">LATENCY</span>
+            <span className="edge-metric-item__value mono">
+              {(latest.inference_time_ms ?? 0).toFixed(1)}
+              <span className="edge-metric-item__unit"> ms</span>
+            </span>
+          </div>
+        </div>
+      </div>
     </section>
   );
 }

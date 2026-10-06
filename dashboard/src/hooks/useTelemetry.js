@@ -140,6 +140,9 @@ export function useTelemetryStream(pipelineId) {
                 has_anomaly: data.has_anomaly ?? false,
                 inference_time_ms: data.inference_time_ms ?? 0,
                 timestamp: data.timestamp_ms,
+                edge_id: data.edge_id ?? prev?.edge_id ?? null,
+                edge_buffer_size: data.edge_buffer_size ?? prev?.edge_buffer_size ?? 0,
+                edge_total_synced: data.edge_total_synced ?? prev?.edge_total_synced ?? 0,
               };
               if (!merged.system) {
                 merged.system = { cpu_percent: 0, memory_percent: 0, gpu_percent: 0 };
@@ -159,6 +162,9 @@ export function useTelemetryStream(pipelineId) {
                 has_anomaly: data.has_anomaly ?? false,
                 inference_time_ms: data.inference_time_ms ?? 0,
                 timestamp: data.timestamp_ms,
+                edge_id: data.edge_id,
+                edge_buffer_size: data.edge_buffer_size ?? 0,
+                edge_total_synced: data.edge_total_synced ?? 0,
                 system: currentLatest?.system || { cpu_percent: 0, memory_percent: 0, gpu_percent: 0 },
               };
               
