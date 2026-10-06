@@ -9,21 +9,26 @@ production / Docker.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Generator, List, Optional
 
 from sqlalchemy import (
+    BigInteger,
     Column,
     DateTime,
     Float,
+    Index,
     Integer,
     String,
     Text,
     create_engine,
     desc,
 )
+
+logger = logging.getLogger("forge.database")
 from sqlalchemy.orm import (
     DeclarativeBase,
     Session,
@@ -85,6 +90,9 @@ class FrameMetric(Base):
     """Per-frame quality and detection metrics."""
 
     __tablename__ = "frame_metrics"
+    __table_args__ = (
+        Index("ix_frame_metrics_source_boot_seq", "source_id", "boot_id", "sequence_number"),
+    )
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     source_id: int = Column(Integer, nullable=False, index=True)
@@ -98,6 +106,9 @@ class FrameMetric(Base):
     brightness: float = Column(Float, nullable=False, default=0.0)
     blur_score: float = Column(Float, nullable=False, default=0.0)
     noise_score: Optional[float] = Column(Float, nullable=True, default=0.0)
+    boot_id: str = Column(String(36), nullable=False, default="")
+    sequence_number: int = Column(Integer, nullable=False, default=0)
+    captured_at_ns: Optional[int] = Column(BigInteger, nullable=True)
     created_at: datetime = Column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
     )
@@ -135,6 +146,24 @@ class Incident(Base):
     severity: str = Column(String(16), nullable=False, default="warning")  # warning | critical
     evidence_path: Optional[str] = Column(String(1024), nullable=True)
     metrics_snapshot: Optional[str] = Column(Text, nullable=True)  # JSON string
+    subsystem_attribution: Optional[str] = Column(String(64), nullable=True)  # FailureSubsystem
+    root_cause_reason: Optional[str] = Column(Text, nullable=True)
+    created_at: datetime = Column(
+        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class AuditLog(Base):
+    """Immutable audit record for operator evidence access and compliance (GDPR/Betriebsrat)."""
+
+    __tablename__ = "audit_logs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    incident_id: str = Column(String(36), nullable=False, index=True)
+    action: str = Column(String(32), nullable=False)  # AuditAction value (VIEW | DOWNLOAD | RESOLVE | EXPORT)
+    client_ip: Optional[str] = Column(String(45), nullable=True)
+    user_agent: Optional[str] = Column(String(256), nullable=True)
+    details: Optional[str] = Column(Text, nullable=True)
     created_at: datetime = Column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
     )
@@ -152,11 +181,28 @@ def init_db() -> None:
     try:
         with engine.connect() as conn:
             cursor = conn.connection.cursor()
+            
+            # Check frame_metrics migrations
             cursor.execute("PRAGMA table_info(frame_metrics)")
-            existing_cols = {row[1] for row in cursor.fetchall()}
-            if "noise_score" not in existing_cols:
+            fm_cols = {row[1] for row in cursor.fetchall()}
+            if "noise_score" not in fm_cols:
                 cursor.execute("ALTER TABLE frame_metrics ADD COLUMN noise_score FLOAT DEFAULT 0.0")
-                conn.connection.commit()
+            if "boot_id" not in fm_cols:
+                cursor.execute("ALTER TABLE frame_metrics ADD COLUMN boot_id VARCHAR(36) DEFAULT ''")
+            if "sequence_number" not in fm_cols:
+                cursor.execute("ALTER TABLE frame_metrics ADD COLUMN sequence_number INTEGER DEFAULT 0")
+            if "captured_at_ns" not in fm_cols:
+                cursor.execute("ALTER TABLE frame_metrics ADD COLUMN captured_at_ns BIGINT")
+                
+            # Check incidents migrations
+            cursor.execute("PRAGMA table_info(incidents)")
+            inc_cols = {row[1] for row in cursor.fetchall()}
+            if "subsystem_attribution" not in inc_cols:
+                cursor.execute("ALTER TABLE incidents ADD COLUMN subsystem_attribution VARCHAR(64)")
+            if "root_cause_reason" not in inc_cols:
+                cursor.execute("ALTER TABLE incidents ADD COLUMN root_cause_reason TEXT")
+                
+            conn.connection.commit()
     except Exception as e:
         logger.warning("Database schema migration check failed (non-fatal): %s", e)
 
@@ -305,3 +351,25 @@ def update_incident(
 
     session.flush()
     return incident
+
+
+def store_audit_log(session: Session, data: Dict[str, Any]) -> AuditLog:
+    """Insert an immutable audit log entry for operator evidence access."""
+    valid_cols = {c.name for c in AuditLog.__table__.columns}
+    payload = {k: v for k, v in data.items() if k in valid_cols}
+    entry = AuditLog(**payload)
+    session.add(entry)
+    session.flush()
+    return entry
+
+
+def get_audit_logs(
+    session: Session,
+    incident_id: Optional[str] = None,
+    limit: int = 100,
+) -> List[AuditLog]:
+    """Return audit log entries, optionally filtered by incident_id."""
+    query = session.query(AuditLog)
+    if incident_id:
+        query = query.filter(AuditLog.incident_id == incident_id)
+    return query.order_by(desc(AuditLog.created_at)).limit(limit).all()
