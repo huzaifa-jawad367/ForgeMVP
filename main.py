@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
+import base64
 import psutil
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
@@ -34,12 +35,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import PipelineStartInput, router
-from app.api.state import DEGRADATION_STATE, PIPELINE_STATE
+from app.api.routes import (
+    EdgeSyncBatch,
+    PipelineStartInput,
+    register_edge_sync_processor,
+    router,
+)
+from app.api.state import DEGRADATION_STATE, EDGE_STATE, PIPELINE_STATE
 from app.incidents.evidence_manager import EvidenceManager
 from app.incidents.incident_engine import IncidentEngine
 from app.incidents.trigger_rules import TriggerConfig
 from app.inference.efficientad_runner import EfficientADRunner
+from app.inference.model_wrapper import Detection
 from app.ingestion.dataset_stream_loader import (
     VisaDatasetStreamLoader,
     find_visa_root,
@@ -620,6 +627,129 @@ def _process_single_frame(
 
 
 # ---------------------------------------------------------------------------
+# Edge Sync Ingestion Processor
+# ---------------------------------------------------------------------------
+
+_backend_evidence_mgr = EvidenceManager(buffer_size=30, pre_incident_offset=5)
+_backend_incident_engine = IncidentEngine(config=TriggerConfig(), evidence_manager=_backend_evidence_mgr)
+
+
+def process_edge_sync_batch(batch: EdgeSyncBatch) -> int:
+    """Process a batch of inference frames synced from an edge device."""
+    global LATEST_FRAME_JPEG
+
+    # 1. Update live preview stream if edge sent a keyframe JPEG
+    if batch.latest_frame_jpeg:
+        try:
+            raw_bytes = base64.b64decode(batch.latest_frame_jpeg)
+            with LATEST_FRAME_LOCK:
+                LATEST_FRAME_JPEG = raw_bytes
+        except Exception as e:
+            logger.debug("Failed to decode edge stream frame: %s", e)
+
+    # 2. Update pipeline state to reflect active edge processing
+    PIPELINE_STATE["is_running"] = True
+    PIPELINE_STATE["source"] = f"{batch.source_id} (Edge: {batch.edge_id})"
+    if not PIPELINE_STATE["start_time"]:
+        PIPELINE_STATE["start_time"] = datetime.now(timezone.utc).isoformat()
+
+    ingested_count = 0
+    for frame in batch.frames:
+        frame_index = frame.get("frame_index", 0)
+        timestamp_ms = frame.get("timestamp_ms", 0.0)
+        fps = frame.get("fps", 0.0)
+        inference_time_ms = frame.get("inference_time_ms", 0.0)
+        system_metrics = frame.get("system_metrics") or _get_gpu_stats()
+
+        stored_incidents = []
+        try:
+            with get_session() as session:
+                store_frame_metric(session, {
+                    "source_id": 1,
+                    "frame_index": frame_index,
+                    "timestamp_ms": timestamp_ms,
+                    "fps": fps,
+                    "inference_time_ms": inference_time_ms,
+                    "mean_confidence": frame.get("mean_confidence", 0.0),
+                    "min_confidence": frame.get("min_confidence", 0.0),
+                    "num_detections": frame.get("num_detections", 0),
+                    "brightness": frame.get("brightness", 0.0),
+                    "blur_score": frame.get("blur_score", 0.0),
+                    "noise_score": frame.get("noise_score", 0.0),
+                })
+                if system_metrics:
+                    store_system_metric(session, system_metrics)
+
+                # Feed Incident Engine
+                raw_dets = frame.get("detections", [])
+                dets = [
+                    Detection(
+                        class_name=d["class_name"],
+                        confidence=d["confidence"],
+                        bbox=tuple(d["bbox"]),
+                    )
+                    for d in raw_dets
+                ]
+                frame_data = _FakeFrameData(
+                    frame=np.zeros((1, 1, 3), dtype=np.uint8),
+                    frame_index=frame_index,
+                    timestamp_ms=timestamp_ms,
+                    source_id=batch.source_id,
+                    fps=fps,
+                )
+                inf_result = _FakeInferenceResult(
+                    detections=dets,
+                    inference_time_ms=inference_time_ms,
+                    model_name=f"EfficientAD ({batch.edge_id})",
+                )
+                new_incidents = _backend_incident_engine.process_frame(
+                    frame_data, inf_result, frame, system_metrics
+                )
+                for inc in new_incidents:
+                    stored = store_incident(session, inc)
+                    stored_incidents.append(stored)
+
+        except Exception as e:
+            logger.debug("Database write for edge frame %d: %s", frame_index, e)
+
+        # Telemetry export to frontend WebSocket
+        try:
+            from app.api.routes import _incident_to_dict
+
+            telemetry_manager.export_frame_metrics(batch.source_id, {
+                "id": frame_index,
+                "source_id": 1,
+                "frame_index": frame_index,
+                "timestamp_ms": timestamp_ms,
+                "fps": fps,
+                "inference_time_ms": inference_time_ms,
+                "mean_confidence": frame.get("mean_confidence", 0.0),
+                "min_confidence": frame.get("min_confidence", 0.0),
+                "num_detections": frame.get("num_detections", 0),
+                "brightness": frame.get("brightness", 0.0),
+                "blur_score": frame.get("blur_score", 0.0),
+                "noise_level": frame.get("noise_level", 0.0),
+                "noise_score": frame.get("noise_score", 0.0),
+                "has_anomaly": frame.get("has_anomaly", False),
+                "edge_id": batch.edge_id,
+                "edge_buffer_size": batch.edge_buffer_stats.get("queue_size", 0),
+                "edge_total_synced": batch.edge_buffer_stats.get("total_synced", 0),
+            })
+            if system_metrics:
+                telemetry_manager.export_system_metrics(system_metrics)
+            for inc in stored_incidents:
+                telemetry_manager.export_incident(_incident_to_dict(inc))
+        except Exception as e:
+            logger.debug("Telemetry export for edge frame %d: %s", frame_index, e)
+
+        PIPELINE_STATE["frames_processed"] += 1
+        PIPELINE_STATE["incidents_total"] += len(stored_incidents)
+        ingested_count += 1
+
+    return ingested_count
+
+
+# ---------------------------------------------------------------------------
 # FastAPI application factory
 # ---------------------------------------------------------------------------
 
@@ -636,6 +766,10 @@ def create_app() -> FastAPI:
         # Setup telemetry WebSocket loop and register exporter
         websocket_manager.set_loop(asyncio.get_running_loop())
         telemetry_manager.register_exporter(websocket_exporter)
+        
+        # Register edge sync processor
+        register_edge_sync_processor(process_edge_sync_batch)
+        logger.info("Edge sync processor registered.")
         
         yield
         _shutdown_event.set()

@@ -31,3 +31,19 @@ PIPELINE_STATE: Dict[str, Any] = {
     "incidents_total": 0,
     "start_time": None,
 }
+
+# ---------------------------------------------------------------------------
+# Edge service telemetry (reported by edge nodes via /api/edge/sync)
+# ---------------------------------------------------------------------------
+EDGE_STATE: Dict[str, Any] = {
+    "is_connected": False,
+    "edge_id": None,
+    "source_id": None,
+    "last_seen": None,
+    "last_seen_seconds_ago": None,
+    "queue_size": 0,
+    "total_synced": 0,
+    "total_dropped": 0,
+    "fps": 0.0,
+    "latency_ms": 0.0,
+}

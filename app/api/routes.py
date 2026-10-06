@@ -10,13 +10,13 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.api.state import DEGRADATION_STATE, PIPELINE_STATE
+from app.api.state import DEGRADATION_STATE, EDGE_STATE, PIPELINE_STATE
 from app.storage.database import (
     FrameMetric,
     Incident,
@@ -77,6 +77,27 @@ class PipelineStartInput(BaseModel):
     loop: bool = True
     fps: Optional[float] = 10.0
     model: Optional[str] = None
+
+
+class EdgeSyncBatch(BaseModel):
+    """Payload sent by an edge node to synchronise batched inference telemetry."""
+
+    edge_id: str
+    source_id: str
+    batch_id: str
+    frames: List[Dict[str, Any]]
+    edge_buffer_stats: Dict[str, Any] = Field(default_factory=dict)
+    latest_frame_jpeg: Optional[str] = None  # Base64 encoded JPEG preview
+
+
+# Global processor callback registered by main backend
+_edge_sync_processor: Optional[Callable[[EdgeSyncBatch], int]] = None
+
+
+def register_edge_sync_processor(fn: Callable[[EdgeSyncBatch], int]) -> None:
+    """Register backend function to process incoming edge sync batches."""
+    global _edge_sync_processor
+    _edge_sync_processor = fn
 
 
 # =========================================================================
@@ -301,6 +322,63 @@ def pipeline_status() -> Any:
             state["uptime_seconds"] = None
     else:
         state["uptime_seconds"] = None
+    return state
+
+
+# =========================================================================
+# Edge Device Sync & Status
+# =========================================================================
+
+
+@router.post("/api/edge/sync", tags=["Edge"])
+def edge_sync(batch: EdgeSyncBatch) -> Any:
+    """Ingest a batch of buffered inference payloads from an edge device."""
+    EDGE_STATE["is_connected"] = True
+    EDGE_STATE["edge_id"] = batch.edge_id
+    EDGE_STATE["source_id"] = batch.source_id
+    EDGE_STATE["last_seen"] = datetime.now(timezone.utc).isoformat()
+    EDGE_STATE["queue_size"] = batch.edge_buffer_stats.get("queue_size", 0)
+    EDGE_STATE["total_synced"] = batch.edge_buffer_stats.get("total_synced", 0)
+    EDGE_STATE["total_dropped"] = batch.edge_buffer_stats.get("total_dropped", 0)
+
+    if batch.frames:
+        last_frame = batch.frames[-1]
+        EDGE_STATE["fps"] = last_frame.get("fps", 0.0)
+        EDGE_STATE["latency_ms"] = last_frame.get("inference_time_ms", 0.0)
+
+    # Ingest frames via registered backend processor
+    ingested_count = 0
+    if _edge_sync_processor is not None:
+        try:
+            ingested_count = _edge_sync_processor(batch)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to process edge sync batch: {e}")
+
+    return {
+        "status": "ack",
+        "edge_id": batch.edge_id,
+        "batch_id": batch.batch_id,
+        "frames_ingested": ingested_count,
+        "controls": dict(DEGRADATION_STATE),
+    }
+
+
+@router.get("/api/edge/status", tags=["Edge"])
+def edge_status() -> Any:
+    """Return edge device connectivity, buffer queue size, and sync stats."""
+    state = dict(EDGE_STATE)
+    if state["last_seen"]:
+        try:
+            last = datetime.fromisoformat(str(state["last_seen"]))
+            diff = (datetime.now(timezone.utc) - last).total_seconds()
+            state["last_seen_seconds_ago"] = round(diff, 2)
+            # Mark disconnected if not heard from within 5.0 seconds
+            state["is_connected"] = diff < 5.0
+        except Exception:
+            state["last_seen_seconds_ago"] = None
+    else:
+        state["last_seen_seconds_ago"] = None
+        state["is_connected"] = False
     return state
 
 
