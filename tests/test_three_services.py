@@ -198,6 +198,7 @@ class TestThreeServicesEndToEnd(unittest.TestCase):
         # Frame with defect detection
         test_frame = {
             "frame_index": 101,
+            "sequence_number": 1,
             "timestamp_ms": time.time() * 1000,
             "fps": 10.0,
             "inference_time_ms": 32.5,
@@ -216,6 +217,12 @@ class TestThreeServicesEndToEnd(unittest.TestCase):
             "noise_level": 0.0,
             "noise_score": 2.1,
             "has_anomaly": True,
+            "timestamps": {
+                "captured_at_ns": time.monotonic_ns(),
+                "inference_started_at_ns": time.monotonic_ns(),
+                "inference_completed_at_ns": time.monotonic_ns(),
+                "queued_at_ns": time.monotonic_ns(),
+            },
         }
 
         # Encode small 100x100 dummy preview frame
@@ -223,7 +230,12 @@ class TestThreeServicesEndToEnd(unittest.TestCase):
         ret, enc = cv2.imencode(".jpg", dummy_img)
         jpeg_b64 = base64.b64encode(enc.tobytes()).decode("ascii")
 
+        from app.schema.contracts import SCHEMA_VERSION
         sync_payload = {
+            "schema_version": SCHEMA_VERSION,
+            "boot_id": "test-boot-id-1234",
+            "sequence_range": {"start": 1, "end": 1},
+            "transmitted_at_ms": time.time() * 1000,
             "edge_id": "edge-unit-test-01",
             "source_id": "visa:pcb1",
             "batch_id": "batch-001",

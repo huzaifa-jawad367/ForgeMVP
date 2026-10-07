@@ -16,7 +16,10 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+import time
+
 from app.api.state import DEGRADATION_STATE, EDGE_STATE, PIPELINE_STATE
+from app.schema.contracts import SCHEMA_VERSION
 from app.storage.database import (
     FrameMetric,
     Incident,
@@ -82,6 +85,10 @@ class PipelineStartInput(BaseModel):
 class EdgeSyncBatch(BaseModel):
     """Payload sent by an edge node to synchronise batched inference telemetry."""
 
+    schema_version: str = SCHEMA_VERSION
+    boot_id: str
+    sequence_range: Dict[str, int]
+    transmitted_at_ms: float
     edge_id: str
     source_id: str
     batch_id: str
@@ -333,6 +340,7 @@ def pipeline_status() -> Any:
 @router.post("/api/edge/sync", tags=["Edge"])
 def edge_sync(batch: EdgeSyncBatch) -> Any:
     """Ingest a batch of buffered inference payloads from an edge device."""
+    received_at_ns = time.monotonic_ns()
     EDGE_STATE["is_connected"] = True
     EDGE_STATE["edge_id"] = batch.edge_id
     EDGE_STATE["source_id"] = batch.source_id
@@ -345,6 +353,11 @@ def edge_sync(batch: EdgeSyncBatch) -> Any:
         last_frame = batch.frames[-1]
         EDGE_STATE["fps"] = last_frame.get("fps", 0.0)
         EDGE_STATE["latency_ms"] = last_frame.get("inference_time_ms", 0.0)
+
+        # Populate received_at_ns in the batch context frames
+        for frame in batch.frames:
+            if "timestamps" in frame:
+                frame["timestamps"]["received_at_ns"] = received_at_ns
 
     # Ingest frames via registered backend processor
     ingested_count = 0
