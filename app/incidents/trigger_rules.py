@@ -148,17 +148,23 @@ def attribute_root_cause(
 
     # 5. MODEL_INFERENCE_STALL: inference_time_ms > 3x baseline while CPU/GPU load is normal (< 70%).
     inference_time_ms = metrics.get("inference_time_ms")
-    cpu_percent = metrics.get("cpu_percent", 0.0)
-    gpu_util = metrics.get("gpu_utilization", 0.0)
-    if (inference_time_ms is not None
+    cpu_percent = metrics.get("cpu_percent") or 0.0
+    gpu_util = metrics.get("gpu_utilization")
+
+    if (
+        inference_time_ms is not None
         and inference_time_ms > 3 * config.baseline_inference_time_ms
         and cpu_percent < 70.0
-        and gpu_util < 70.0):
+        and (gpu_util is None or gpu_util < 70.0)
+    ):
         return (FailureSubsystem.MODEL_INFERENCE_STALL, f"Inference stall detected ({inference_time_ms:.2f}ms > 3x baseline)")
 
     # 6. HARDWARE_GPU_EXHAUSTION: GPU utilization sustained >= 98% or gpu_temperature >= 85°C.
     gpu_temp = metrics.get("gpu_temperature")
-    if (gpu_util >= config.max_gpu_utilization) or (gpu_temp is not None and gpu_temp >= 85.0):
+    if (
+        (gpu_util is not None and gpu_util >= config.max_gpu_utilization) or
+        (gpu_temp is not None and gpu_temp >= 85.0)
+    ):
         return (FailureSubsystem.HARDWARE_GPU_EXHAUSTION, f"GPU exhaustion detected (util: {gpu_util}%, temp: {gpu_temp}°C)")
 
     # 7. NETWORK_PARTITION: Edge queue growing continuously with ack_age > 10.0s.
