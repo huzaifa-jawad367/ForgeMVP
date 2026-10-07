@@ -441,6 +441,8 @@ def _incident_to_dict(i: Incident) -> Dict[str, Any]:
         "id": i.id,
         "incident_type": i.incident_type,
         "source_id": i.source_id,
+        "subsystem_attribution": i.subsystem_attribution,
+        "root_cause_reason": i.root_cause_reason,
         "start_time": i.start_time.isoformat() if i.start_time else None,
         "end_time": i.end_time.isoformat() if i.end_time else None,
         "started_at": i.start_time.isoformat() if i.start_time else None,

@@ -17,6 +17,7 @@ from app.incidents.trigger_rules import (
     IncidentType,
     TriggerConfig,
     evaluate_triggers,
+    attribute_root_cause,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,13 +82,33 @@ class IncidentEngine:
             be empty).
         """
         # 1. Build the combined metrics dict expected by evaluate_triggers.
+        # Include all necessary metrics from frame_metrics, system_metrics, and inference_result
+        # for root cause attribution heuristics.
+        fps = frame_metrics.get("current_fps", frame_metrics.get("fps", 0.0))
         combined: Dict[str, Any] = {
             "mean_confidence": frame_metrics.get("mean_confidence"),
             "blur_score": frame_metrics.get("blur_score"),
-            "current_fps": frame_metrics.get("current_fps", frame_metrics.get("fps")),
+            "current_fps": fps,
+            "fps": fps,
             "seconds_since_last_frame": frame_metrics.get("seconds_since_last_frame"),
             "gpu_temperature": system_metrics.get("gpu_temperature"),
+            "noise_score": frame_metrics.get("noise_score"),
+            "brightness": frame_metrics.get("brightness"),
+            "cpu_percent": system_metrics.get("cpu_percent"),
+            "gpu_utilization": system_metrics.get("gpu_utilization"),
+            "ack_age": frame_metrics.get("ack_age"),
+            "pipeline_active": frame_metrics.get("pipeline_active", True),
         }
+        if inference_result:
+            if hasattr(inference_result, 'anomaly_score'):
+                combined["anomaly_score"] = inference_result.anomaly_score
+            elif isinstance(inference_result, dict):
+                combined["anomaly_score"] = inference_result.get("anomaly_score", 0.0)
+
+            if hasattr(inference_result, 'inference_time_ms'):
+                combined["inference_time_ms"] = inference_result.inference_time_ms
+            elif isinstance(inference_result, dict):
+                combined["inference_time_ms"] = inference_result.get("inference_time_ms", 0.0)
 
         # 2. Evaluate which trigger types fire on this frame.
         triggered_types = set(evaluate_triggers(combined, self._config))
@@ -121,6 +142,16 @@ class IncidentEngine:
                     "evidence_path": evidence_result.get("evidence_dir"),
                     "metrics_snapshot": {**combined, **system_metrics},
                 }
+
+                # Evaluate root cause attribution
+                attribution_result = attribute_root_cause({**combined, **system_metrics}, self._config)
+                if attribution_result:
+                    subsystem, reason = attribution_result
+                    record["subsystem_attribution"] = subsystem.value
+                    record["root_cause_reason"] = reason
+                else:
+                    record["subsystem_attribution"] = None
+                    record["root_cause_reason"] = None
 
                 self.active_incidents[itype] = record
                 self._all_incidents.append(record)
