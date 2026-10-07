@@ -20,6 +20,31 @@ logger = logging.getLogger(__name__)
 _BufferEntry = Tuple[np.ndarray, int, float]  # (frame, frame_index, timestamp_ms)
 
 
+
+def _crop_frame_to_roi(frame: np.ndarray, metrics_snapshot: Dict[str, Any]) -> np.ndarray:
+    """Crop frame to the bounding box of detections with a 20% margin."""
+    detections = metrics_snapshot.get("detections")
+    if not detections:
+        return frame
+
+    min_x = min(d['bbox'][0] for d in detections)
+    min_y = min(d['bbox'][1] for d in detections)
+    max_x = max(d['bbox'][2] for d in detections)
+    max_y = max(d['bbox'][3] for d in detections)
+
+    width = max_x - min_x
+    height = max_y - min_y
+    margin_w = int(width * 0.2)
+    margin_h = int(height * 0.2)
+
+    crop_x1 = max(0, min_x - margin_w)
+    crop_y1 = max(0, min_y - margin_h)
+    crop_x2 = min(frame.shape[1], max_x + margin_w)
+    crop_y2 = min(frame.shape[0], max_y + margin_h)
+
+    return frame[crop_y1:crop_y2, crop_x1:crop_x2]
+
+
 class EvidenceManager:
     """Ring-buffer backed evidence capture system.
 
@@ -108,7 +133,7 @@ class EvidenceManager:
         if incident_frame_index in index_map:
             incident_entry = self._buffer[index_map[incident_frame_index]]
             path = save_frame(
-                incident_entry[0],
+                _crop_frame_to_roi(incident_entry[0], metrics_snapshot),
                 f"{evidence_dir}/incident_frame_{incident_frame_index}.jpg",
             )
             result["incident_frame_path"] = path
@@ -118,7 +143,7 @@ class EvidenceManager:
         if pre_index in index_map:
             pre_entry = self._buffer[index_map[pre_index]]
             path = save_frame(
-                pre_entry[0],
+                _crop_frame_to_roi(pre_entry[0], metrics_snapshot),
                 f"{evidence_dir}/pre_frame_{pre_index}.jpg",
             )
             result["pre_frame_path"] = path
@@ -128,7 +153,7 @@ class EvidenceManager:
             if self._buffer:
                 oldest = self._buffer[0]
                 path = save_frame(
-                    oldest[0],
+                    _crop_frame_to_roi(oldest[0], metrics_snapshot),
                     f"{evidence_dir}/pre_frame_{oldest[1]}.jpg",
                 )
                 result["pre_frame_path"] = path
