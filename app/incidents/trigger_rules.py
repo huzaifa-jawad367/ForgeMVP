@@ -126,7 +126,13 @@ def attribute_root_cause(
 
     # 1. CAMERA_DISCONNECT: fps == 0 for > 3.0s while pipeline is active.
     seconds_since = metrics.get("seconds_since_last_frame")
-    if (fps == 0 or (seconds_since is not None and seconds_since > 3.0)) and pipeline_active:
+    if (
+        (
+            (fps == 0 and (seconds_since is None or seconds_since > 3.0)) or
+            (seconds_since is not None and seconds_since > 3.0)
+        )
+        and pipeline_active
+    ):
         return (FailureSubsystem.CAMERA_DISCONNECT, "Camera disconnected or no frames received for > 3.0s")
 
     anomaly_score = metrics.get("anomaly_score", 0.0)
