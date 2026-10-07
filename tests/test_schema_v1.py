@@ -5,8 +5,7 @@ import json
 
 from pydantic import ValidationError
 from app.api.routes import EdgeSyncBatch
-from app.edge.service import EdgeService
-from app.edge.buffer import EdgePayload
+from app.edge.buffer import EdgeBuffer, EdgePayload
 
 class TestSchemaV1(unittest.TestCase):
     def test_schema_v1_payload_compliance(self):
@@ -47,8 +46,7 @@ class TestSchemaV1(unittest.TestCase):
 
     def test_nanosecond_monotonic_transitions(self):
         """Assert all duration transitions are strictly positive (>= 0)."""
-        edge = EdgeService(source_input="test")
-        edge._shutdown_event.clear()
+        buffer = EdgeBuffer(db_path=None)
 
         # mock inference process
         # captured_at -> inference_started -> inference_completed -> queued_at -> transmitted_at
@@ -71,9 +69,9 @@ class TestSchemaV1(unittest.TestCase):
                 "queued_at_ns": queued_at,
             }
         )
-        edge.buffer.push(payload)
+        buffer.push(payload)
 
-        batch = edge.buffer.peek_batch(1)
+        batch = buffer.peek_batch(1)
 
         transmitted_at = time.monotonic_ns()
         for p in batch:
