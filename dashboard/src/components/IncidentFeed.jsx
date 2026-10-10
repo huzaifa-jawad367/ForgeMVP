@@ -29,6 +29,21 @@ function formatTime(isoStr) {
   });
 }
 
+
+function formatSubsystemPill(subsystem) {
+  if (!subsystem) return '';
+  const map = {
+    'FAILURE_OPTICAL_DEFOCUS': '[OPTICAL: DEFOCUS]',
+    'FAILURE_OPTICAL_SENSOR_NOISE': '[OPTICAL: NOISE]',
+    'FAILURE_ENVIRONMENTAL_LIGHTING': '[OPTICAL: LIGHTING]',
+    'FAILURE_SUBSYSTEM_CAMERA': '[HARDWARE: CAMERA]',
+    'FAILURE_HARDWARE_GPU_EXHAUSTION': '[HARDWARE: GPU]',
+    'FAILURE_NETWORK_PARTITION': '[NETWORK: PARTITION]',
+    'FAILURE_MODEL_INFERENCE_STALL': '[MODEL: STALL]'
+  };
+  return map[subsystem] || `[${subsystem.replace('FAILURE_', '').replace(/_/g, ' ')}]`;
+}
+
 export default function IncidentFeed({ incidents, onSelect }) {
   const list = incidents || [];
 
@@ -68,6 +83,11 @@ export default function IncidentFeed({ incidents, onSelect }) {
                 <span className="incident-card__type">
                   {(inc.incident_type || 'unknown').replace(/_/g, ' ')}
                 </span>
+                {inc.subsystem_attribution && (
+                  <span className="incident-card__subsystem">
+                    {formatSubsystemPill(inc.subsystem_attribution)}
+                  </span>
+                )}
                 <span
                   className={`incident-card__severity ${isCritical ? 'incident-card__severity--critical' : 'incident-card__severity--warning'}`}
                 >
