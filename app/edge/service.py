@@ -79,9 +79,6 @@ class EdgeService:
         self.batch_size = batch_size
         self.loop = loop
 
-        self.boot_id = str(uuid.uuid4())
-        self.sequence_number = 0
-
         # 1. Local Edge Buffer
         self.buffer = EdgeBuffer(max_size=buffer_max_size, db_path=db_path)
 
@@ -273,7 +270,6 @@ class EdgeService:
 
         while not self._shutdown_event.is_set():
             # 1. Fetch next frame
-            captured_at_ns = time.monotonic_ns()
             if stream_gen is not None:
                 try:
                     stream_frame = next(stream_gen)
@@ -301,7 +297,6 @@ class EdgeService:
             # 3. Model inference on edge
             detections = []
             inference_time_ms = 0.0
-            inference_started_at_ns = time.monotonic_ns()
             if self.model is not None:
                 try:
                     inf_res = self.model.predict(degraded_frame)
@@ -309,7 +304,6 @@ class EdgeService:
                     inference_time_ms = inf_res.inference_time_ms
                 except Exception:
                     logger.debug("[%s] Inference error on frame %d", self.edge_id, frame_counter)
-            inference_completed_at_ns = time.monotonic_ns()
 
             # 4. Compute metrics
             gray = cv2.cvtColor(degraded_frame, cv2.COLOR_BGR2GRAY) if len(degraded_frame.shape) == 3 else degraded_frame
@@ -347,11 +341,9 @@ class EdgeService:
             sys_metrics = _get_hardware_telemetry()
 
             # 8. Create payload and push to edge buffer
-            self.sequence_number += 1
             payload = EdgePayload(
                 payload_id=str(uuid.uuid4()),
                 frame_index=frame_counter,
-                sequence_number=self.sequence_number,
                 timestamp_ms=timestamp_ms,
                 fps=measured_fps,
                 inference_time_ms=inference_time_ms,
@@ -366,12 +358,6 @@ class EdgeService:
                 has_anomaly=has_anomaly,
                 system_metrics=sys_metrics,
                 frame_jpeg_b64=jpeg_b64 if frame_counter % 2 == 0 else None,  # Sync keyframes regularly
-                timestamps={
-                    "captured_at_ns": captured_at_ns,
-                    "inference_started_at_ns": inference_started_at_ns,
-                    "inference_completed_at_ns": inference_completed_at_ns,
-                    "queued_at_ns": time.monotonic_ns(),
-                }
             )
             self.buffer.push(payload)
 
@@ -404,30 +390,11 @@ class EdgeService:
                 latest_jpeg = self._latest_jpeg_b64
 
             # Prepare sync batch package
-            transmitted_at_ms = time.time() * 1000.0
-            transmitted_at_ns = time.monotonic_ns()
-
-            # Inject transmitted_at_ns into frames
-            frames_dict = []
-            for p in batch:
-                p_dict = p.to_dict()
-                if "timestamps" in p_dict:
-                    p_dict["timestamps"]["transmitted_at_ns"] = transmitted_at_ns
-                frames_dict.append(p_dict)
-
-            sequence_start = batch[0].sequence_number if batch else 0
-            sequence_end = batch[-1].sequence_number if batch else 0
-
-            from app.schema.contracts import SCHEMA_VERSION
             payload_data = {
-                "schema_version": SCHEMA_VERSION,
-                "boot_id": self.boot_id,
-                "sequence_range": {"start": sequence_start, "end": sequence_end},
-                "transmitted_at_ms": transmitted_at_ms,
                 "edge_id": self.edge_id,
                 "source_id": self.source_input,
                 "batch_id": str(uuid.uuid4()),
-                "frames": frames_dict,
+                "frames": [p.to_dict() for p in batch],
                 "edge_buffer_stats": self.buffer.get_stats(),
                 "latest_frame_jpeg": latest_jpeg,
             }
