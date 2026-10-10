@@ -73,7 +73,57 @@ export default function IncidentModal({ incident, onClose, onResolved }) {
           <MetaItem label="Started" value={formatDt(incident.started_at)} />
           <MetaItem label="Resolved" value={incident.resolved_at ? formatDt(incident.resolved_at) : '—'} />
           <MetaItem label="Duration" value={computeDuration(incident.started_at, incident.resolved_at)} mono />
+
+          {incident.subsystem_attribution && (
+            <div className="attribution-badge-container">
+              <span className={`attribution-badge ${getBadgeClass(incident.subsystem_attribution)}`}>
+                {incident.subsystem_attribution.replace('FAILURE_', '').replace(/_/g, ' ')}
+                {incident.root_cause_reason && `: ${incident.root_cause_reason}`}
+              </span>
+            </div>
+          )}
+
         </div>
+
+
+        {/* Lifecycle Latency Waterfall */}
+        {(() => {
+          const snapshot = evidence?.metadata || incident.metrics_snapshot;
+          if (!snapshot) return null;
+          const ts = snapshot.timestamps || snapshot; // Sometimes it's nested
+
+          if (!ts.captured_at_ns || !ts.inference_completed_at_ns || !ts.queued_at_ns || !ts.transmitted_at_ns || !ts.persisted_at_ns) {
+            return null;
+          }
+
+          const captureMs = (ts.inference_completed_at_ns - ts.captured_at_ns) / 1e6;
+          const queueMs = (ts.queued_at_ns - ts.inference_completed_at_ns) / 1e6;
+          const transportMs = (ts.transmitted_at_ns - ts.queued_at_ns) / 1e6;
+          const persistMs = (ts.persisted_at_ns - ts.transmitted_at_ns) / 1e6;
+
+          const totalMs = captureMs + queueMs + transportMs + persistMs;
+          if (totalMs <= 0) return null;
+
+          const pct = (val) => Math.max(2, (val / totalMs) * 100) + '%';
+
+          return (
+            <div className="waterfall-container">
+              <h3 className="modal__section-title">Lifecycle Latency Waterfall</h3>
+              <div className="waterfall-bar">
+                <div className="waterfall-segment segment-capture" style={{ width: pct(captureMs) }} title={`Inference: ${captureMs.toFixed(1)}ms`}></div>
+                <div className="waterfall-segment segment-queue" style={{ width: pct(queueMs) }} title={`Queue: ${queueMs.toFixed(1)}ms`}></div>
+                <div className="waterfall-segment segment-transport" style={{ width: pct(transportMs) }} title={`Transport: ${transportMs.toFixed(1)}ms`}></div>
+                <div className="waterfall-segment segment-persist" style={{ width: pct(persistMs) }} title={`Persist: ${persistMs.toFixed(1)}ms`}></div>
+              </div>
+              <div className="waterfall-legend">
+                <span><span className="legend-dot dot-capture"></span> Inf: {captureMs.toFixed(1)}ms</span>
+                <span><span className="legend-dot dot-queue"></span> Que: {queueMs.toFixed(1)}ms</span>
+                <span><span className="legend-dot dot-transport"></span> Net: {transportMs.toFixed(1)}ms</span>
+                <span><span className="legend-dot dot-persist"></span> DB: {persistMs.toFixed(1)}ms</span>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Evidence carousel */}
         {hasEvidence && (
@@ -142,6 +192,26 @@ export default function IncidentModal({ incident, onClose, onResolved }) {
 }
 
 /* Helpers */
+
+function getBadgeClass(subsystem) {
+  if (!subsystem) return '';
+  switch (subsystem) {
+    case 'FAILURE_OPTICAL_DEFOCUS':
+    case 'FAILURE_OPTICAL_SENSOR_NOISE':
+    case 'FAILURE_ENVIRONMENTAL_LIGHTING':
+      return 'badge-amber';
+    case 'FAILURE_SUBSYSTEM_CAMERA':
+    case 'FAILURE_HARDWARE_GPU_EXHAUSTION':
+      return 'badge-red';
+    case 'FAILURE_NETWORK_PARTITION':
+      return 'badge-orange';
+    case 'FAILURE_MODEL_INFERENCE_STALL':
+      return 'badge-purple';
+    default:
+      return 'badge-cyan';
+  }
+}
+
 function MetaItem({ label, value, mono }) {
   return (
     <div className="meta-item">
