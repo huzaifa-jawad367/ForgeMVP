@@ -28,6 +28,7 @@ class EdgePayload:
 
     payload_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     frame_index: int = 0
+    sequence_number: int = 0
     timestamp_ms: float = 0.0
     fps: float = 0.0
     inference_time_ms: float = 0.0
@@ -43,6 +44,7 @@ class EdgePayload:
     system_metrics: Dict[str, Any] = field(default_factory=dict)
     privacy: Optional[PrivacyPayload] = None
     frame_jpeg_b64: Optional[str] = None
+    timestamps: Dict[str, int] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, Any]:

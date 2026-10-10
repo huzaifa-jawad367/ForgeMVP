@@ -51,6 +51,7 @@ from app.ingestion.dataset_stream_loader import (
     VisaDatasetStreamLoader,
     find_visa_root,
 )
+from app.storage.maintenance import MaintenanceWorker
 from app.storage.database import (
     get_session,
     init_db,
@@ -771,8 +772,14 @@ def create_app() -> FastAPI:
         register_edge_sync_processor(process_edge_sync_batch)
         logger.info("Edge sync processor registered.")
         
+        maintenance_worker = MaintenanceWorker(interval_seconds=3600.0)
+        maintenance_worker.start()
+        logger.info("Maintenance worker started.")
+
         yield
+        maintenance_worker.stop()
         _shutdown_event.set()
+
         logger.info("Forge shutting down.")
 
     app = FastAPI(
