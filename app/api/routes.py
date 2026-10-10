@@ -101,10 +101,11 @@ class EdgeSyncBatch(BaseModel):
 
 
 # Global processor callback registered by main backend
-_edge_sync_processor: Optional[Callable[[EdgeSyncBatch], int]] = None
+from typing import Tuple
+_edge_sync_processor: Optional[Callable[[EdgeSyncBatch], Tuple[int, int]]] = None
 
 
-def register_edge_sync_processor(fn: Callable[[EdgeSyncBatch], int]) -> None:
+def register_edge_sync_processor(fn: Callable[[EdgeSyncBatch], Tuple[int, int]]) -> None:
     """Register backend function to process incoming edge sync batches."""
     global _edge_sync_processor
     _edge_sync_processor = fn
@@ -385,9 +386,14 @@ def edge_sync(batch: EdgeSyncBatch) -> Any:
 
     # Ingest frames via registered backend processor
     ingested_count = 0
+    deduplicated_count = 0
     if _edge_sync_processor is not None:
         try:
-            ingested_count = _edge_sync_processor(batch)
+            res = _edge_sync_processor(batch)
+            if isinstance(res, tuple):
+                ingested_count, deduplicated_count = res
+            else:
+                ingested_count = res
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to process edge sync batch: {e}")
 
@@ -396,6 +402,7 @@ def edge_sync(batch: EdgeSyncBatch) -> Any:
         "edge_id": batch.edge_id,
         "batch_id": batch.batch_id,
         "frames_ingested": ingested_count,
+        "frames_deduplicated": deduplicated_count,
         "controls": dict(DEGRADATION_STATE),
     }
 

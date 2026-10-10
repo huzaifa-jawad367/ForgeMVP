@@ -93,12 +93,16 @@ def _get_gpu_stats() -> Dict[str, Optional[float]]:
         temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
         pynvml.nvmlShutdown()
         return {
+            "cpu_percent": 0.0,
+            "memory_percent": 0.0,
             "gpu_utilization": float(util.gpu),
             "gpu_memory_percent": float(mem.used / mem.total * 100) if mem.total else 0.0,
             "gpu_temperature": float(temp),
         }
     except Exception:
         return {
+            "cpu_percent": 0.0,
+            "memory_percent": 0.0,
             "gpu_utilization": None,
             "gpu_memory_percent": None,
             "gpu_temperature": None,
@@ -635,7 +639,8 @@ _backend_evidence_mgr = EvidenceManager(buffer_size=30, pre_incident_offset=5)
 _backend_incident_engine = IncidentEngine(config=TriggerConfig(), evidence_manager=_backend_evidence_mgr)
 
 
-def process_edge_sync_batch(batch: EdgeSyncBatch) -> int:
+from typing import Tuple
+def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
     """Process a batch of inference frames synced from an edge device."""
     global LATEST_FRAME_JPEG
 
@@ -655,6 +660,8 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> int:
         PIPELINE_STATE["start_time"] = datetime.now(timezone.utc).isoformat()
 
     ingested_count = 0
+    deduplicated_count = 0
+    import time
     for frame in batch.frames:
         frame_index = frame.get("frame_index", 0)
         timestamp_ms = frame.get("timestamp_ms", 0.0)
@@ -665,9 +672,18 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> int:
         stored_incidents = []
         try:
             with get_session() as session:
-                store_frame_metric(session, {
+                from app.storage.database import store_frame_metric_idempotent
+                persisted_at_ns = time.monotonic_ns()
+                if "timestamps" in frame and isinstance(frame["timestamps"], dict):
+                    frame["timestamps"]["persisted_at_ns"] = persisted_at_ns
+
+                metric_dict = {
                     "source_id": 1,
                     "frame_index": frame_index,
+                    "boot_id": batch.edge_id,
+                    "sequence_number": frame.get("sequence_number", 0),
+                    "captured_at_ns": frame.get("timestamps", {}).get("captured_at_ns") if isinstance(frame.get("timestamps"), dict) else frame.get("captured_at_ns"),
+                    "persisted_at_ns": persisted_at_ns,
                     "timestamp_ms": timestamp_ms,
                     "fps": fps,
                     "inference_time_ms": inference_time_ms,
@@ -677,7 +693,11 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> int:
                     "brightness": frame.get("brightness", 0.0),
                     "blur_score": frame.get("blur_score", 0.0),
                     "noise_score": frame.get("noise_score", 0.0),
-                })
+                }
+                _, is_inserted = store_frame_metric_idempotent(session, metric_dict)
+                if not is_inserted:
+                    deduplicated_count += 1
+                    continue
                 if system_metrics:
                     store_system_metric(session, system_metrics)
 
@@ -685,6 +705,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> int:
                 raw_dets = frame.get("detections", [])
                 dets = [
                     Detection(
+                        class_id=0,
                         class_name=d["class_name"],
                         confidence=d["confidence"],
                         bbox=tuple(d["bbox"]),
@@ -711,7 +732,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> int:
                     stored_incidents.append(stored)
 
         except Exception as e:
-            logger.debug("Database write for edge frame %d: %s", frame_index, e)
+            logger.exception("Database write for edge frame %d: %s", frame_index, e)
 
         # Telemetry export to frontend WebSocket
         try:
@@ -747,7 +768,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> int:
         PIPELINE_STATE["incidents_total"] += len(stored_incidents)
         ingested_count += 1
 
-    return ingested_count
+    return ingested_count, deduplicated_count
 
 
 # ---------------------------------------------------------------------------

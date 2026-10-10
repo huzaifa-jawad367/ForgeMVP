@@ -109,6 +109,7 @@ class FrameMetric(Base):
     boot_id: str = Column(String(36), nullable=False, default="")
     sequence_number: int = Column(Integer, nullable=False, default=0)
     captured_at_ns: Optional[int] = Column(BigInteger, nullable=True)
+    persisted_at_ns: Optional[int] = Column(BigInteger, nullable=True)
     created_at: datetime = Column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
     )
@@ -193,6 +194,8 @@ def init_db() -> None:
                 cursor.execute("ALTER TABLE frame_metrics ADD COLUMN sequence_number INTEGER DEFAULT 0")
             if "captured_at_ns" not in fm_cols:
                 cursor.execute("ALTER TABLE frame_metrics ADD COLUMN captured_at_ns BIGINT")
+            if "persisted_at_ns" not in fm_cols:
+                cursor.execute("ALTER TABLE frame_metrics ADD COLUMN persisted_at_ns BIGINT")
                 
             # Check incidents migrations
             cursor.execute("PRAGMA table_info(incidents)")
@@ -236,6 +239,37 @@ def get_session() -> Generator[Session, None, None]:
 # CRUD helpers
 # ---------------------------------------------------------------------------
 
+
+from typing import Tuple
+
+def store_frame_metric_idempotent(session: Session, data: Dict[str, Any]) -> Tuple[Optional[FrameMetric], bool]:
+    """Idempotently insert a single :class:`FrameMetric` row.
+
+    Checks if a record with (source_id, boot_id, sequence_number) already exists
+    when boot_id is non-empty.
+
+    Returns:
+        Tuple of (metric, is_new).
+    """
+    source_id = data.get("source_id")
+    boot_id = data.get("boot_id", "")
+    seq_num = data.get("sequence_number", 0)
+
+    if boot_id:
+        existing = (
+            session.query(FrameMetric)
+            .filter_by(source_id=source_id, boot_id=boot_id, sequence_number=seq_num)
+            .first()
+        )
+        if existing:
+            return existing, False
+
+    valid_cols = {c.name for c in FrameMetric.__table__.columns}
+    payload = {k: v for k, v in data.items() if k in valid_cols}
+    metric = FrameMetric(**payload)
+    session.add(metric)
+    session.flush()
+    return metric, True
 
 def store_frame_metric(session: Session, data: Dict[str, Any]) -> FrameMetric:
     """Insert a single :class:`FrameMetric` row.
