@@ -12,15 +12,18 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import time
 
 from app.api.state import DEGRADATION_STATE, EDGE_STATE, PIPELINE_STATE
-from app.schema.contracts import SCHEMA_VERSION
+from app.schema.contracts import SCHEMA_VERSION, AuditAction
 from app.storage.database import (
+    AuditLog,
+    store_audit_log,
+    get_audit_logs,
     FrameMetric,
     Incident,
     Source,
@@ -251,7 +254,7 @@ def resolve_incident(incident_id: str) -> Any:
 
 
 @router.get("/api/incidents/{incident_id}/evidence", tags=["Incidents"])
-def get_incident_evidence(incident_id: str) -> Any:
+def get_incident_evidence(incident_id: str, request: Request) -> Any:
     """Return evidence image filenames and metadata for an incident."""
     with get_session() as session:
         row = session.query(Incident).get(incident_id)
@@ -271,6 +274,16 @@ def get_incident_evidence(incident_id: str) -> Any:
                     with open(fpath, "r", encoding="utf-8") as fh:
                         metadata = json.load(fh)
 
+        store_audit_log(
+            session,
+            {
+                "incident_id": incident_id,
+                "action": AuditAction.VIEW.value,
+                "client_ip": request.client.host if request.client else None,
+                "user_agent": request.headers.get("user-agent"),
+            }
+        )
+
         return {
             "incident_id": incident_id,
             "evidence_dir": evidence_dir,
@@ -278,6 +291,17 @@ def get_incident_evidence(incident_id: str) -> Any:
             "metadata": metadata,
         }
 
+
+
+@router.get("/api/audit-logs", tags=["Incidents"])
+def list_audit_logs(
+    incident_id: Optional[str] = Query(None, description="Filter by incident ID"),
+    limit: int = Query(100, ge=1, le=1000),
+) -> Any:
+    """Return paginated list of AuditLog records."""
+    with get_session() as session:
+        rows = get_audit_logs(session, incident_id=incident_id, limit=limit)
+        return [_audit_log_to_dict(r) for r in rows]
 
 # =========================================================================
 # Demo / Degradation Controls
@@ -454,4 +478,16 @@ def _incident_to_dict(i: Incident) -> Dict[str, Any]:
         "evidence_path": i.evidence_path,
         "metrics_snapshot": snap,
         "created_at": i.created_at.isoformat() if i.created_at else None,
+    }
+
+
+def _audit_log_to_dict(a: AuditLog) -> Dict[str, Any]:
+    return {
+        "id": a.id,
+        "incident_id": a.incident_id,
+        "action": a.action,
+        "client_ip": a.client_ip,
+        "user_agent": a.user_agent,
+        "details": a.details,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
     }
