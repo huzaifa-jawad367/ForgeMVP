@@ -43,6 +43,7 @@ class EdgePayload:
     noise_level: float = 0.0
     noise_score: float = 0.0
     has_anomaly: bool = False
+    anomaly_score: float = 0.0
     system_metrics: Dict[str, Any] = field(default_factory=dict)
     privacy: Optional[PrivacyPayload] = None
     frame_jpeg_b64: Optional[str] = None

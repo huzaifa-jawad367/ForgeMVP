@@ -724,7 +724,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
                     detections=dets,
                     inference_time_ms=inference_time_ms,
                     model_name=f"EfficientAD ({batch.edge_id})",
-                    anomaly_score=frame.get("anomaly_score", frame.get("mean_confidence", 0.0))
+                    anomaly_score=frame.get("anomaly_score", 0.0)
                 )
                 new_incidents = _backend_incident_engine.process_frame(
                     frame_data, inf_result, frame, system_metrics

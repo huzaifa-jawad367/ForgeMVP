@@ -340,8 +340,9 @@ class TestMVPAcceptanceProtocol(unittest.TestCase):
 
         # Deduplication must result in 0 new inserted records
         self.assertEqual(count_before, count_after)
+        import uuid
         # Test that the same sequence numbers under a NEW boot_id are inserted, not deduplicated
-        new_boot_id = "test-boot-id-new-12345"
+        new_boot_id = f"test-boot-id-new-{uuid.uuid4().hex}"
         dup_frames_data_new_boot = []
         for f in offline_frames[:3]:
             # copy fields
@@ -391,6 +392,7 @@ class TestMVPAcceptanceProtocol(unittest.TestCase):
             count_before_new = session.query(FrameMetric).count()
 
         with urllib.request.urlopen(req_new_boot, timeout=3.0) as resp:
+            res_body = json.loads(resp.read().decode("utf-8"))
             self.assertEqual(resp.status, 200)
 
         with get_session() as session:

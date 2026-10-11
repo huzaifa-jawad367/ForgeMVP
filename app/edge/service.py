@@ -383,6 +383,7 @@ class EdgeService:
                 noise_level=noise_level,
                 noise_score=noise_std,
                 has_anomaly=has_anomaly,
+                anomaly_score=getattr(inference_result, 'anomaly_score', 0.0) if inference_result else 0.0,
                 system_metrics=sys_metrics,
                 privacy=privacy_payload,
                 frame_jpeg_b64=jpeg_b64 if frame_counter % 2 == 0 else None,  # Sync keyframes regularly
