@@ -25,7 +25,7 @@ export default function IncidentModal({ incident, onClose, onResolved }) {
   const isActive = incident.status === 'active';
   const isCritical = incident.severity === 'critical';
 
-  const evidenceFiles = evidence?.evidence_files || evidence?.frames || [];
+  const evidenceFiles = evidence?.images || evidence?.evidence_files || evidence?.frames || [];
   const hasEvidence = evidenceFiles.length > 0;
 
   const handleResolve = async () => {
@@ -96,12 +96,13 @@ export default function IncidentModal({ incident, onClose, onResolved }) {
             return null;
           }
 
-          const captureMs = (ts.inference_completed_at_ns - ts.captured_at_ns) / 1e6;
-          const queueMs = (ts.queued_at_ns - ts.inference_completed_at_ns) / 1e6;
-          const transportMs = (ts.transmitted_at_ns - ts.queued_at_ns) / 1e6;
-          const persistMs = (ts.persisted_at_ns - ts.transmitted_at_ns) / 1e6;
+          const toMs = (start, end) => Number(BigInt(end) - BigInt(start)) / 1e6;
+          const prepMs = toMs(ts.captured_at_ns, ts.inference_started_at_ns);
+          const inferMs = toMs(ts.inference_started_at_ns, ts.inference_completed_at_ns);
+          const queueDwellMs = toMs(ts.queued_at_ns, ts.transmitted_at_ns);
+          const persistMs = toMs(ts.received_at_ns, ts.persisted_at_ns);
 
-          const totalMs = captureMs + queueMs + transportMs + persistMs;
+          const totalMs = prepMs + inferMs + queueDwellMs + persistMs;
           if (totalMs <= 0) return null;
 
           const pct = (val) => Math.max(2, (val / totalMs) * 100) + '%';
@@ -110,15 +111,15 @@ export default function IncidentModal({ incident, onClose, onResolved }) {
             <div className="waterfall-container">
               <h3 className="modal__section-title">Lifecycle Latency Waterfall</h3>
               <div className="waterfall-bar">
-                <div className="waterfall-segment segment-capture" style={{ width: pct(captureMs) }} title={`Inference: ${captureMs.toFixed(1)}ms`}></div>
-                <div className="waterfall-segment segment-queue" style={{ width: pct(queueMs) }} title={`Queue: ${queueMs.toFixed(1)}ms`}></div>
-                <div className="waterfall-segment segment-transport" style={{ width: pct(transportMs) }} title={`Transport: ${transportMs.toFixed(1)}ms`}></div>
+                <div className="waterfall-segment segment-capture" style={{ width: pct(prepMs) }} title={`Prep: ${prepMs.toFixed(1)}ms`}></div>
+                <div className="waterfall-segment segment-queue" style={{ width: pct(inferMs) }} title={`Inference: ${inferMs.toFixed(1)}ms`}></div>
+                <div className="waterfall-segment segment-transport" style={{ width: pct(queueDwellMs) }} title={`Buffer Dwell: ${queueDwellMs.toFixed(1)}ms`}></div>
                 <div className="waterfall-segment segment-persist" style={{ width: pct(persistMs) }} title={`Persist: ${persistMs.toFixed(1)}ms`}></div>
               </div>
               <div className="waterfall-legend">
-                <span><span className="legend-dot dot-capture"></span> Inf: {captureMs.toFixed(1)}ms</span>
-                <span><span className="legend-dot dot-queue"></span> Que: {queueMs.toFixed(1)}ms</span>
-                <span><span className="legend-dot dot-transport"></span> Net: {transportMs.toFixed(1)}ms</span>
+                <span><span className="legend-dot dot-capture"></span> Prep: {prepMs.toFixed(1)}ms</span>
+                <span><span className="legend-dot dot-queue"></span> Inf: {inferMs.toFixed(1)}ms</span>
+                <span><span className="legend-dot dot-transport"></span> Buf: {queueDwellMs.toFixed(1)}ms</span>
                 <span><span className="legend-dot dot-persist"></span> DB: {persistMs.toFixed(1)}ms</span>
               </div>
             </div>

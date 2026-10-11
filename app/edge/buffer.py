@@ -16,8 +16,9 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import shutil
 
-from app.schema.contracts import PrivacyPayload
+from app.schema.contracts import PrivacyPayload, PriorityTier
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class EdgePayload:
     system_metrics: Dict[str, Any] = field(default_factory=dict)
     privacy: Optional[PrivacyPayload] = None
     frame_jpeg_b64: Optional[str] = None
+    priority: PriorityTier = field(default=PriorityTier.P3_METRIC)
     timestamps: Dict[str, int] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
@@ -73,6 +75,12 @@ class EdgeBuffer:
         self.total_enqueued = 0
         self.total_synced = 0
         self.total_dropped = 0
+        self.drops_by_tier = {
+            PriorityTier.P0_INCIDENT: 0,
+            PriorityTier.P1_ANOMALY: 0,
+            PriorityTier.P2_DIAGNOSTIC: 0,
+            PriorityTier.P3_METRIC: 0,
+        }
 
         if self.db_path:
             self._init_sqlite()
@@ -110,21 +118,67 @@ class EdgeBuffer:
     def push(self, payload: EdgePayload) -> bool:
         """Push an inference payload into the edge buffer."""
         with self._lock:
-            if len(self._queue) >= self.max_size:
-                # Evict oldest item to prevent OOM
-                dropped = self._queue.pop(0)
-                self.total_dropped += 1
-                if self.db_path:
-                    try:
-                        with sqlite3.connect(self.db_path) as conn:
-                            conn.execute("DELETE FROM edge_queue WHERE payload_id = ?", (dropped.payload_id,))
-                    except Exception:
-                        pass
-                logger.warning(
-                    "Edge buffer full (%d items). Dropped oldest frame #%d",
-                    self.max_size,
-                    dropped.frame_index,
-                )
+            # Check disk fullness circuit breaker (95%)
+            disk_path = self.db_path or "/"
+            try:
+                # Resolve directory for disk usage
+                check_path = Path(disk_path).parent if self.db_path else Path(disk_path)
+                if check_path.exists():
+                    total, used, free = shutil.disk_usage(check_path)
+                    if total > 0 and (used / total) >= 0.95:
+                        logger.critical("Circuit Breaker: Edge disk >= 95%% full. Halting local caching.")
+                        self.total_dropped += 1
+                        self.drops_by_tier[payload.priority] += 1
+                        return False
+            except Exception as e:
+                logger.warning(f"Failed to check disk usage: {e}")
+
+            high_watermark = int(self.max_size * 0.80)
+
+            # If buffer size is above or equal to high watermark, we evict to make room for the new incoming payload.
+            if len(self._queue) >= high_watermark:
+                evict_candidates = [
+                    PriorityTier.P3_METRIC,
+                    PriorityTier.P2_DIAGNOSTIC,
+                    PriorityTier.P1_ANOMALY
+                ]
+
+                evicted = False
+                for target_priority in evict_candidates:
+                    for i in range(len(self._queue)):
+                        if self._queue[i].priority == target_priority:
+                            dropped = self._queue.pop(i)
+                            self.total_dropped += 1
+                            self.drops_by_tier[dropped.priority] += 1
+                            if self.db_path:
+                                try:
+                                    with sqlite3.connect(self.db_path) as conn:
+                                        conn.execute("DELETE FROM edge_queue WHERE payload_id = ?", (dropped.payload_id,))
+                                except Exception:
+                                    pass
+                            logger.warning(
+                                "Edge buffer >= 80%% (%d items). Evicted %s frame #%d",
+                                len(self._queue) + 1,
+                                dropped.priority,
+                                dropped.frame_index,
+                            )
+                            evicted = True
+                            break
+                    if evicted:
+                        break
+
+                if not evicted:
+                    if payload.priority != PriorityTier.P0_INCIDENT:
+                        self.total_dropped += 1
+                        self.drops_by_tier[payload.priority] += 1
+                        logger.warning("Edge buffer full of P0s. Dropped incoming %s", payload.priority)
+                        return False
+                    else:
+                        if len(self._queue) >= self.max_size:
+                            logger.warning("Edge buffer at absolute max capacity with P0s. Dropping incoming P0.")
+                            self.total_dropped += 1
+                            self.drops_by_tier[payload.priority] += 1
+                            return False
 
             self._queue.append(payload)
             self.total_enqueued += 1
@@ -188,10 +242,24 @@ class EdgeBuffer:
     def get_stats(self) -> Dict[str, Any]:
         """Return runtime statistics for edge telemetry."""
         with self._lock:
+            counts = {
+                PriorityTier.P0_INCIDENT: 0,
+                PriorityTier.P1_ANOMALY: 0,
+                PriorityTier.P2_DIAGNOSTIC: 0,
+                PriorityTier.P3_METRIC: 0,
+            }
+            for item in self._queue:
+                counts[item.priority] += 1
+
             return {
                 "queue_size": len(self._queue),
                 "max_size": self.max_size,
                 "total_enqueued": self.total_enqueued,
                 "total_synced": self.total_synced,
                 "total_dropped": self.total_dropped,
+                "p0_count": counts[PriorityTier.P0_INCIDENT],
+                "p1_count": counts[PriorityTier.P1_ANOMALY],
+                "p2_count": counts[PriorityTier.P2_DIAGNOSTIC],
+                "p3_count": counts[PriorityTier.P3_METRIC],
+                "drops_by_tier": {k.value: v for k, v in self.drops_by_tier.items()},
             }
