@@ -26,7 +26,7 @@ from app.edge.buffer import EdgeBuffer, EdgePayload
 from app.edge.privacy import redact_worker_pii
 from app.inference.efficientad_runner import EfficientADRunner
 from app.ingestion.dataset_stream_loader import VisaDatasetStreamLoader
-from app.schema.contracts import PrivacyPayload
+from app.schema.contracts import PrivacyPayload, PriorityTier
 
 logger = logging.getLogger("forge.edge")
 
@@ -353,6 +353,17 @@ class EdgeService:
 
             # 9. Create payload and push to edge buffer
             privacy_payload: PrivacyPayload = {"pii_redacted": True, "redaction_method": "in_memory_gaussian_roi"} if was_redacted else {"pii_redacted": False, "redaction_method": "none"}
+
+            # Determine priority tier
+            if has_anomaly:
+                priority_tier = PriorityTier.P0_INCIDENT
+            elif mean_conf > 0.50:
+                priority_tier = PriorityTier.P1_ANOMALY
+            elif frame_counter % 2 == 0:  # Same condition as frame_jpeg_b64 is not None
+                priority_tier = PriorityTier.P2_DIAGNOSTIC
+            else:
+                priority_tier = PriorityTier.P3_METRIC
+
             # 8. Create payload and push to edge buffer
             self.sequence_number += 1
             payload = EdgePayload(
@@ -374,6 +385,7 @@ class EdgeService:
                 system_metrics=sys_metrics,
                 privacy=privacy_payload,
                 frame_jpeg_b64=jpeg_b64 if frame_counter % 2 == 0 else None,  # Sync keyframes regularly
+                priority=priority_tier,
                 timestamps={
                     "captured_at_ns": captured_at_ns,
                     "inference_started_at_ns": inference_started_at_ns,
