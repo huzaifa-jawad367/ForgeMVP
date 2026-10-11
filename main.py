@@ -485,6 +485,7 @@ class _FakeInferenceResult:
     detections: list
     inference_time_ms: float
     model_name: str
+    anomaly_score: float = 0.0
 
 
 def _process_single_frame(
@@ -723,6 +724,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
                     detections=dets,
                     inference_time_ms=inference_time_ms,
                     model_name=f"EfficientAD ({batch.edge_id})",
+                    anomaly_score=frame.get("anomaly_score", frame.get("mean_confidence", 0.0))
                 )
                 new_incidents = _backend_incident_engine.process_frame(
                     frame_data, inf_result, frame, system_metrics
