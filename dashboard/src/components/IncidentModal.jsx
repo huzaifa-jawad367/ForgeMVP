@@ -25,7 +25,7 @@ export default function IncidentModal({ incident, onClose, onResolved }) {
   const isActive = incident.status === 'active';
   const isCritical = incident.severity === 'critical';
 
-  const evidenceFiles = evidence?.evidence_files || evidence?.frames || [];
+  const evidenceFiles = evidence?.images || evidence?.evidence_files || evidence?.frames || [];
   const hasEvidence = evidenceFiles.length > 0;
 
   const handleResolve = async () => {
@@ -99,7 +99,7 @@ export default function IncidentModal({ incident, onClose, onResolved }) {
           const captureMs = (ts.inference_completed_at_ns - ts.captured_at_ns) / 1e6;
           const queueMs = (ts.queued_at_ns - ts.inference_completed_at_ns) / 1e6;
           const transportMs = (ts.transmitted_at_ns - ts.queued_at_ns) / 1e6;
-          const persistMs = (ts.persisted_at_ns - ts.transmitted_at_ns) / 1e6;
+          const persistMs = (ts.persisted_at_ns - ts.received_at_ns) / 1e6;
 
           const totalMs = captureMs + queueMs + transportMs + persistMs;
           if (totalMs <= 0) return null;
