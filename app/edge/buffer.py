@@ -28,6 +28,7 @@ class EdgePayload:
     """A single edge inference result and telemetry frame."""
 
     payload_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    boot_id: str = ""
     frame_index: int = 0
     sequence_number: int = 0
     timestamp_ms: float = 0.0

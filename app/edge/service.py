@@ -368,6 +368,7 @@ class EdgeService:
             self.sequence_number += 1
             payload = EdgePayload(
                 payload_id=str(uuid.uuid4()),
+                boot_id=self.boot_id,
                 frame_index=frame_counter,
                 sequence_number=self.sequence_number,
                 timestamp_ms=timestamp_ms,

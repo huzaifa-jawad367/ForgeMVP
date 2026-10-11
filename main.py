@@ -681,7 +681,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
                 metric_dict = {
                     "source_id": 1,
                     "frame_index": frame_index,
-                    "boot_id": batch.edge_id,
+                    "boot_id": frame.get("boot_id", batch.boot_id),
                     "sequence_number": frame.get("sequence_number", 0),
                     "captured_at_ns": frame.get("timestamps", {}).get("captured_at_ns") if isinstance(frame.get("timestamps"), dict) else frame.get("captured_at_ns"),
                     "persisted_at_ns": persisted_at_ns,
