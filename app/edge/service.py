@@ -306,6 +306,7 @@ class EdgeService:
             # 4. Model inference on edge
             detections = []
             inference_time_ms = 0.0
+            inf_res = None
             inference_started_at_ns = time.monotonic_ns()
             if self.model is not None:
                 try:
@@ -383,7 +384,7 @@ class EdgeService:
                 noise_level=noise_level,
                 noise_score=noise_std,
                 has_anomaly=has_anomaly,
-                anomaly_score=getattr(inference_result, 'anomaly_score', 0.0) if inference_result else 0.0,
+                anomaly_score=getattr(inf_res, 'anomaly_score', 0.0) if inf_res else 0.0,
                 system_metrics=sys_metrics,
                 privacy=privacy_payload,
                 frame_jpeg_b64=jpeg_b64 if frame_counter % 2 == 0 else None,  # Sync keyframes regularly
