@@ -485,6 +485,7 @@ class _FakeInferenceResult:
     detections: list
     inference_time_ms: float
     model_name: str
+    anomaly_score: float = 0.0
 
 
 def _process_single_frame(
@@ -680,7 +681,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
                 metric_dict = {
                     "source_id": 1,
                     "frame_index": frame_index,
-                    "boot_id": batch.edge_id,
+                    "boot_id": frame.get("boot_id", batch.boot_id),
                     "sequence_number": frame.get("sequence_number", 0),
                     "captured_at_ns": frame.get("timestamps", {}).get("captured_at_ns") if isinstance(frame.get("timestamps"), dict) else frame.get("captured_at_ns"),
                     "persisted_at_ns": persisted_at_ns,
@@ -723,6 +724,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
                     detections=dets,
                     inference_time_ms=inference_time_ms,
                     model_name=f"EfficientAD ({batch.edge_id})",
+                    anomaly_score=frame.get("anomaly_score", 0.0)
                 )
                 new_incidents = _backend_incident_engine.process_frame(
                     frame_data, inf_result, frame, system_metrics
