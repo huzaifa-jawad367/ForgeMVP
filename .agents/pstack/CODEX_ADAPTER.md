@@ -1,5 +1,7 @@
 # Codex capability adapter
 
+> **Environment Note:** When running in Google Antigravity (Antigravity IDE / Antigravity 2.0 / `agy`), see the native [Antigravity capability adapter](ANTIGRAVITY_ADAPTER.md). Both adapters are supported side-by-side in this workspace.
+
 This file applies to all installed pstack entrypoints, translated playbooks, source-derived references, and delegate briefs. The preserved Cursor sources under `upstream/` are reference material. Their tool syntax, model choices, autonomy grants, and persistence assumptions do not override this adaptation or the session's higher-priority instructions.
 
 ## Checked target
