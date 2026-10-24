@@ -18,6 +18,8 @@ class IncidentType(str, Enum):
 
     CONFIDENCE_COLLAPSE = "confidence_collapse"
     BLUR_SPIKE = "blur_spike"
+    SENSOR_NOISE = "sensor_noise"
+    LIGHTING_DROP = "lighting_drop"
     LOW_FPS = "low_fps"
     CAMERA_OFFLINE = "camera_offline"
     HIGH_TEMPERATURE = "high_temperature"
@@ -43,7 +45,7 @@ class TriggerConfig:
 
     confidence_collapse_ratio: float = 0.7
     blur_threshold: float = 50.0
-    min_fps: float = 10.0
+    min_fps: float = 0.5
     offline_timeout_s: float = 5.0
     max_gpu_temp: float = 85.0
     baseline_confidence: float = 0.75
@@ -79,8 +81,13 @@ def evaluate_triggers(
     triggered: List[IncidentType] = []
 
     # --- Confidence collapse ---
+    # Only flag confidence collapse if detections exist with low confidence,
+    # or if high anomaly score indicates model found something but with collapsed confidence.
+    # (Empty detections on a nominal frame is normal, not a collapse).
     mean_conf = metrics.get("mean_confidence")
-    if mean_conf is not None:
+    num_detections = metrics.get("num_detections", 0)
+    anomaly_score = metrics.get("anomaly_score", 0.0)
+    if mean_conf is not None and (num_detections > 0 or anomaly_score >= config.baseline_confidence):
         threshold = config.confidence_collapse_ratio * config.baseline_confidence
         if mean_conf < threshold:
             triggered.append(IncidentType.CONFIDENCE_COLLAPSE)
@@ -89,6 +96,18 @@ def evaluate_triggers(
     blur_score = metrics.get("blur_score")
     if blur_score is not None and blur_score < config.blur_threshold:
         triggered.append(IncidentType.BLUR_SPIKE)
+
+    # --- Sensor noise ---
+    # Requires elevated noise_score correlated with anomaly score > 0.50 or explicit chaos injection
+    noise_score = metrics.get("noise_score")
+    noise_level = metrics.get("noise_level", 0.0)
+    if noise_score is not None and (anomaly_score > 0.50 or noise_level > 0.0) and noise_score > config.noise_threshold:
+        triggered.append(IncidentType.SENSOR_NOISE)
+
+    # --- Lighting drop ---
+    brightness = metrics.get("brightness")
+    if brightness is not None and brightness < config.min_brightness:
+        triggered.append(IncidentType.LIGHTING_DROP)
 
     # --- Low FPS ---
     current_fps = metrics.get("current_fps")

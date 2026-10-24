@@ -42,6 +42,7 @@ class InferenceResult:
     detections: list[Detection] = field(default_factory=list)
     inference_time_ms: float = 0.0
     model_name: str = ""
+    anomaly_score: float = 0.0
 
 
 class BaseInferenceModel(abc.ABC):

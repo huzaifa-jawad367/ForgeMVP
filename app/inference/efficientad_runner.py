@@ -151,4 +151,5 @@ class EfficientADRunner(BaseInferenceModel):
             detections=detections,
             inference_time_ms=round(elapsed_ms, 2),
             model_name=self._model_name,
+            anomaly_score=score,
         )

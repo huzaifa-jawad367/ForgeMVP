@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 _SEVERITY: Dict[IncidentType, str] = {
     IncidentType.CONFIDENCE_COLLAPSE: "critical",
     IncidentType.BLUR_SPIKE: "warning",
+    IncidentType.SENSOR_NOISE: "warning",
+    IncidentType.LIGHTING_DROP: "warning",
     IncidentType.LOW_FPS: "warning",
     IncidentType.CAMERA_OFFLINE: "critical",
     IncidentType.HIGH_TEMPERATURE: "critical",
@@ -33,30 +35,58 @@ _SEVERITY: Dict[IncidentType, str] = {
 
 
 class IncidentEngine:
-    """Per-source incident state machine.
+    """Per-source incident state machine with debouncing, hysteresis and delta tracking.
 
     Tracks which incidents are currently *active* and which have been
-    *resolved*.  Each call to :meth:`process_frame` advances the state
-    by one frame tick.
+    *resolved*. Manages continuous telemetry attachment, delta threshold
+    events, and hysteresis-based resolution to eliminate alert flooding.
 
     Args:
         config: Trigger thresholds to use for evaluation.
         evidence_manager: Shared evidence ring-buffer manager.
+        recovery_threshold_frames: Number of consecutive clean frames
+            required before resolving an active incident.
+        delta_threshold_pct: Percentage point shift in degradation severity
+            required to emit a severity delta event (default: 10%).
     """
 
     def __init__(
         self,
         config: TriggerConfig,
         evidence_manager: EvidenceManager,
+        recovery_threshold_frames: int = 3,
+        delta_threshold_pct: float = 10.0,
     ) -> None:
         self._config = config
         self._evidence = evidence_manager
+        self._recovery_threshold = recovery_threshold_frames
+        self._delta_threshold_pct = delta_threshold_pct
 
         # Keyed by IncidentType → incident record dict.
         self.active_incidents: Dict[IncidentType, Dict[str, Any]] = {}
 
+        # Debounce: consecutive clean/normal frames per IncidentType
+        self._consecutive_normal: Dict[IncidentType, int] = {}
+
+        # Last reported metric value per IncidentType for delta detection
+        self._last_metric_val: Dict[IncidentType, float] = {}
+
         # Flat archive of every incident (active + resolved).
         self._all_incidents: List[Dict[str, Any]] = []
+
+    def _get_primary_metric(self, itype: IncidentType, metrics: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+        """Return (current_metric_value, scale_denominator) for percentage delta calculation."""
+        if itype == IncidentType.BLUR_SPIKE:
+            return metrics.get("blur_score"), self._config.blur_threshold
+        elif itype == IncidentType.SENSOR_NOISE:
+            return metrics.get("noise_score"), self._config.noise_threshold
+        elif itype == IncidentType.LIGHTING_DROP:
+            return metrics.get("brightness"), self._config.min_brightness
+        elif itype == IncidentType.CONFIDENCE_COLLAPSE:
+            return metrics.get("mean_confidence"), self._config.baseline_confidence
+        elif itype == IncidentType.LOW_FPS:
+            return metrics.get("current_fps"), self._config.min_fps
+        return None, None
 
     # ------------------------------------------------------------------
     # Core processing
@@ -78,15 +108,14 @@ class IncidentEngine:
             system_metrics: Hardware telemetry dict (CPU, GPU, etc.).
 
         Returns:
-            A list of *newly created* incident dicts for this frame (may
-            be empty).
+            A list of incident event dicts (newly opened, severity delta,
+            or cleared) for this frame.
         """
         # 1. Build the combined metrics dict expected by evaluate_triggers.
-        # Include all necessary metrics from frame_metrics, system_metrics, and inference_result
-        # for root cause attribution heuristics.
         fps = frame_metrics.get("current_fps", frame_metrics.get("fps", 0.0))
         combined: Dict[str, Any] = {
             "mean_confidence": frame_metrics.get("mean_confidence"),
+            "num_detections": frame_metrics.get("num_detections", 0),
             "blur_score": frame_metrics.get("blur_score"),
             "current_fps": fps,
             "fps": fps,
@@ -113,14 +142,19 @@ class IncidentEngine:
         # 2. Evaluate which trigger types fire on this frame.
         triggered_types = set(evaluate_triggers(combined, self._config))
 
-        new_incidents: List[Dict[str, Any]] = []
+        incident_events: List[Dict[str, Any]] = []
         now = datetime.now(timezone.utc)
+        frame_index = getattr(frame_data, "frame_index", 0)
 
-        # 3. Open new incidents for freshly triggered types.
+        # 3. Handle active & new incidents for triggered types
         for itype in triggered_types:
+            # Active condition is firing: reset normal recovery counter
+            self._consecutive_normal[itype] = 0
+            curr_val, scale = self._get_primary_metric(itype, combined)
+
             if itype not in self.active_incidents:
+                # OPEN NEW INCIDENT (Single initial event)
                 incident_id = str(uuid4())
-                frame_index = getattr(frame_data, "frame_index", 0)
 
                 # Capture evidence (pre-frame + incident frame + metrics).
                 evidence_result = self._evidence.capture_evidence(
@@ -136,11 +170,19 @@ class IncidentEngine:
                     "start_time": now.isoformat(),
                     "end_time": None,
                     "start_frame": frame_index,
-                    "end_frame": None,
+                    "end_frame": frame_index,
                     "status": "active",
                     "severity": _SEVERITY.get(itype, "warning"),
                     "evidence_path": evidence_result.get("evidence_dir"),
                     "metrics_snapshot": {**combined, **system_metrics},
+                    "events": [
+                        {
+                            "event_type": "opened",
+                            "timestamp": now.isoformat(),
+                            "frame_index": frame_index,
+                            "metric_value": curr_val,
+                        }
+                    ],
                 }
 
                 # Evaluate root cause attribution
@@ -154,8 +196,9 @@ class IncidentEngine:
                     record["root_cause_reason"] = None
 
                 self.active_incidents[itype] = record
+                self._last_metric_val[itype] = curr_val if curr_val is not None else 0.0
                 self._all_incidents.append(record)
-                new_incidents.append(record)
+                incident_events.append(record)
 
                 logger.warning(
                     "Incident OPENED: %s [%s] severity=%s frame=%d",
@@ -165,25 +208,76 @@ class IncidentEngine:
                     frame_index,
                 )
 
-        # 4. Resolve incidents whose triggers are no longer firing.
-        resolved_types = [
-            itype
-            for itype in list(self.active_incidents)
-            if itype not in triggered_types
-        ]
+            else:
+                # ALREADY ACTIVE: Maintain ONE continuous incident.
+                # Update continuous telemetry without duplicating incident records.
+                record = self.active_incidents[itype]
+                record["end_frame"] = frame_index
+                record["metrics_snapshot"] = {**combined, **system_metrics}
+
+                # Check for significant delta (>= 10 percentage points shift)
+                if curr_val is not None and scale and scale > 0:
+                    last_val = self._last_metric_val.get(itype, curr_val)
+                    delta_pct = (abs(curr_val - last_val) / scale) * 100.0
+                    if delta_pct >= self._delta_threshold_pct:
+                        delta_direction = "increased" if curr_val > last_val else "decreased"
+                        delta_event = {
+                            "event_type": "severity_delta",
+                            "timestamp": now.isoformat(),
+                            "frame_index": frame_index,
+                            "previous_value": last_val,
+                            "current_value": curr_val,
+                            "delta_pct": round(delta_pct, 1),
+                            "direction": delta_direction,
+                            "description": f"{itype.value} {delta_direction} by {delta_pct:.1f}% ({last_val:.1f} -> {curr_val:.1f})",
+                        }
+                        if "events" not in record or not isinstance(record["events"], list):
+                            record["events"] = []
+                        record["events"].append(delta_event)
+                        self._last_metric_val[itype] = curr_val
+
+                        logger.info(
+                            "Incident DELTA: %s [%s] %s",
+                            itype.value,
+                            record["id"],
+                            delta_event["description"],
+                        )
+                        incident_events.append(record)
+
+        # 4. Debounced resolution with hysteresis (require sustained recovery)
+        resolved_types: List[IncidentType] = []
+        for itype in list(self.active_incidents):
+            if itype not in triggered_types:
+                self._consecutive_normal[itype] = self._consecutive_normal.get(itype, 0) + 1
+                if self._consecutive_normal[itype] >= self._recovery_threshold:
+                    # Sustained recovery reached: emit cleared event
+                    resolved_types.append(itype)
+
         for itype in resolved_types:
             record = self.active_incidents.pop(itype)
+            self._consecutive_normal.pop(itype, None)
+            self._last_metric_val.pop(itype, None)
             record["status"] = "resolved"
             record["end_time"] = now.isoformat()
-            record["end_frame"] = getattr(frame_data, "frame_index", None)
+            record["end_frame"] = frame_index
+            if "events" not in record or not isinstance(record["events"], list):
+                record["events"] = []
+            record["events"].append({
+                "event_type": "cleared",
+                "timestamp": now.isoformat(),
+                "frame_index": frame_index,
+                "description": f"{itype.value} cleared on camera (stable for {self._recovery_threshold} frames)",
+            })
+            incident_events.append(record)
 
             logger.info(
-                "Incident RESOLVED: %s [%s]",
+                "Incident CLEARED: %s [%s] frame=%d",
                 itype.value,
                 record["id"],
+                frame_index,
             )
 
-        return new_incidents
+        return incident_events
 
     # ------------------------------------------------------------------
     # Query helpers
