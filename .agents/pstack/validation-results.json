@@ -1,0 +1,44 @@
+{
+  "checked_on": "2026-10-23",
+  "files": {
+    "skills": 43,
+    "principles": 24,
+    "playbooks": 23,
+    "source_files": 120,
+    "local_links_checked": 266
+  },
+  "bundled_skill_creator_validator": {
+    "skills_checked": 43,
+    "failures": []
+  },
+  "version": "codex-cli 0.162.0-alpha.17.2",
+  "discovery": [
+    {
+      "cwd": ".",
+      "enabled_repo_skills": 43,
+      "errors": [],
+      "interface_metadata": "parsed"
+    },
+    {
+      "cwd": "dashboard",
+      "enabled_repo_skills": 43,
+      "errors": [],
+      "interface_metadata": "parsed"
+    }
+  ],
+  "model_turns_sent_by_discovery_check": 0,
+  "invocation_policy_enforcement": "not exposed by skills/list; not verified",
+  "behavioral_probe": {
+    "task": "Read-only source investigation of edge buffering, persistence, and removal after reconnect",
+    "delegates": 1,
+    "conversation_fork": "none",
+    "routing": "inherit-parent",
+    "outcome": "Scoped evidence-backed answer; no app mutations reported or added to the working tree",
+    "limits": [
+      "One source-based task, not all playbooks end to end",
+      "No independent model-family routing verified",
+      "No runtime outage experiment executed by this probe",
+      "Leaf-read sequence is delegate-reported, not transcript-audited"
+    ]
+  }
+}

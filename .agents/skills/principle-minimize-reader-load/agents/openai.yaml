@@ -1,0 +1,6 @@
+interface:
+  display_name: "Principle Minimize Reader Load"
+  short_description: "Project-local pstack workflow adapted for Codex"
+  default_prompt: "Use $principle-minimize-reader-load for this project task."
+policy:
+  allow_implicit_invocation: false
