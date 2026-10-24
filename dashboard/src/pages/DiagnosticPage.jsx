@@ -1,88 +1,24 @@
-import React, { useState, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import StatusBar from '../components/StatusBar';
-import MetricsPanel from '../components/MetricsPanel';
-import IncidentFeed from '../components/IncidentFeed';
-import IncidentModal from '../components/IncidentModal';
-import LiveStreamViewer from '../components/LiveStreamViewer';
-import DemoControls from '../components/DemoControls';
-import { usePipelineStatus } from '../hooks/useForgeApi';
-import { useTelemetryStream } from '../hooks/useTelemetry';
-import pipelines from '../data/mockPipelines';
-
+import { useState } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { API_BASE } from '../hooks/useForgeApi';
+import { useDemoStatus, useBackendObservation } from '../hooks/useDemoApi';
+import { PageHeading, Stat, Signal, ErrorNotice, number } from '../components/DemoUi';
 export default function DiagnosticPage() {
-  const { pipelineId } = useParams();
-
-  /* ── Find the mock pipeline matching the route param ── */
-  const pipeline = pipelines.find((p) => p.id === pipelineId) || null;
-
-  /* ── Real-time Telemetry Stream ── */
-  const { latestMetrics, metricsHistory, incidents } = useTelemetryStream(pipelineId);
-
-  /* ── API hooks ── */
-  const { data: pipelineStatus } = usePipelineStatus();
-
-  /* ── Incident modal ── */
-  const [selectedIncident, setSelectedIncident] = useState(null);
-
-  const handleIncidentResolved = useCallback(() => {
-    setSelectedIncident(null);
-  }, []);
-
-  /* ── Derive incident list ── */
-  const incidentList = incidents || [];
-
-  return (
-    <div className="app">
-      {/* Grid / scanline background */}
-      <div className="app__bg" />
-
-      {/* Back link */}
-      <div className="diag-back-bar">
-        <Link to="/dashboard" className="diag-back-link">
-          <span className="diag-back-link__arrow">←</span>
-          Back to Dashboard
-        </Link>
-        {pipeline && (
-          <span className="diag-back-bar__pipeline mono">
-            {pipeline.name}
-          </span>
-        )}
-      </div>
-
-      {/* Top status bar — enriched with pipeline metadata */}
-      <StatusBar status={pipelineStatus} pipeline={pipeline} />
-
-      {/* Main content area */}
-      <main className="app__main">
-        <div className="app__stream-and-metrics">
-          <LiveStreamViewer
-            pipeline={pipeline}
-            latestMetrics={latestMetrics}
-            pipelineStatus={pipelineStatus}
-          />
-          <MetricsPanel
-            metricsHistory={metricsHistory}
-            latestMetrics={latestMetrics}
-          />
-        </div>
-        <IncidentFeed
-          incidents={incidentList}
-          onSelect={setSelectedIncident}
-        />
-      </main>
-
-      {/* Bottom demo controls */}
-      <DemoControls />
-
-      {/* Incident detail modal */}
-      {selectedIncident && (
-        <IncidentModal
-          incident={selectedIncident}
-          onClose={() => setSelectedIncident(null)}
-          onResolved={handleIncidentResolved}
-        />
-      )}
-    </div>
-  );
+  const edge = useDemoStatus();
+  const latest = useBackendObservation('/api/metrics/latest');
+  const history = useBackendObservation('/api/metrics?source_id=1&limit=60');
+  const incidents = useBackendObservation('/api/incidents?limit=20');
+  const [streamFailed, setStreamFailed] = useState(false);
+  const [streamNonce, setStreamNonce] = useState(0);
+  const [selected, setSelected] = useState(null);
+  const data = edge.data;
+  const metric = latest.data?.frame_metric;
+  const chart = (history.data || []).slice().reverse().map(row => ({ ...row, time: new Date(row.created_at).toLocaleTimeString([], { hour12: false }) }));
+  return <>
+    <PageHeading eyebrow="LIVE INSPECTION" title="Watch the line. Understand the signal.">The latest inspection stream, optical measurements, and attributed incidents from the active pipeline.</PageHeading>
+    <div className="signal-row"><Signal poll={edge} label="Edge observation" /><Signal poll={latest} label="Backend metrics" /><span className="muted">Backend measurements pause when sync is disconnected.</span></div><ErrorNotice error={edge.error} /><ErrorNotice error={latest.error} />
+    <div className="inspection-grid"><section className="panel"><div className="section-heading"><h2>Inspection stream</h2><span className="tag">{data?.source_id || 'Source unavailable'}</span></div><div className="inspection-stream">{!streamFailed ? <img src={`${API_BASE}/api/stream/live?t=${streamNonce}`} alt="Latest inspection stream relayed by backend; frames may pause during a sync outage" onError={() => setStreamFailed(true)} /> : <div className="image-empty"><h3>Stream unavailable</h3><p>The backend has not supplied a readable stream.</p><button className="button" onClick={() => { setStreamFailed(false); setStreamNonce(Date.now()); }}>Retry stream</button></div>}</div><p className="small muted">Backend-relayed preview. During a sync outage the last frame can remain visible; use independent edge telemetry to check capture activity.</p></section><div className="inspection-stats"><Stat label="Edge capture rate" value={data?.fps == null ? '—' : `${number(data.fps, 1)} FPS`} detail={edge.error ? 'Last known measurement' : 'Observed capture rate'} /><Stat label="Latest anomaly score" value={number(metric?.anomaly_score, 3)} detail="Most recent backend frame" /><Stat label="Frame assessment" value={metric?.has_anomaly == null ? '—' : metric.has_anomaly ? 'Anomaly' : 'Normal'} detail={metric?.created_at ? `Received ${new Date(metric.created_at).toLocaleTimeString()}` : 'Awaiting measurements'} /></div></div>
+    <div className="two-column">{[['Optical blur score', 'blur_score', '#62d5bf'], ['Anomaly score', 'anomaly_score', '#a6b7e8']].map(([title, key, color]) => <section className="panel" key={key}><h2>{title}</h2><ErrorNotice error={history.error} /><div className="chart-container"><ResponsiveContainer width="100%" height={220}><LineChart data={chart} margin={{ right: 10, top: 15, left: -12 }}><CartesianGrid vertical={false} stroke="#29383b" /><XAxis dataKey="time" minTickGap={60} tick={{ fill: '#a4b5b8', fontSize: 12 }} /><YAxis tick={{ fill: '#a4b5b8', fontSize: 12 }} /><Tooltip contentStyle={{ background: '#182528', border: '1px solid #405458' }} /><Line type="monotone" dataKey={key} name={title} stroke={color} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} /></LineChart></ResponsiveContainer></div><p className="small muted">Actual stored backend measurements · most recent 60 frames</p></section>)}</div>
+    <section className="panel"><div className="section-heading"><h2>Recent incidents</h2><span className="muted small">Select a record to inspect attribution</span></div><ErrorNotice error={incidents.error} /><div className="record-list">{(incidents.data || []).map(item => <button className="record record-button" key={item.id} onClick={() => setSelected(selected?.id === item.id ? null : item)} aria-expanded={selected?.id === item.id}><div><strong>{item.incident_type?.replaceAll('_', ' ')}</strong><p>{item.subsystem_attribution || 'Unattributed'} · {item.created_at ? new Date(item.created_at).toLocaleString() : 'No timestamp'}</p></div><span className={`tag ${item.status === 'active' ? 'tag--warning' : ''}`}>{item.status}</span></button>)}</div>{!incidents.data?.length && <p className="empty-state">No incident records available.</p>}{selected && <div className="incident-detail"><div className="section-heading"><h3>Incident attribution</h3><button className="button button--small" onClick={() => setSelected(null)}>Close details</button></div><p>{selected.root_cause_reason || 'No root-cause explanation was recorded.'}</p><p className="small muted mono">{selected.id}</p><p className="small muted">Evidence lifecycle panels are not yet connected to edge keyframes. This view does not claim complete pre/post-incident evidence.</p></div>}</section>
+  </>;
 }

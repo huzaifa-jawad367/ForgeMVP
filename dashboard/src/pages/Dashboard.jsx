@@ -41,7 +41,7 @@ export default function Dashboard() {
 
       {/* ── Pipeline grid ── */}
       <main className="dashboard__grid">
-        {pipelines.map((p, i) => (
+        {pipelines.map((p) => (
           <PipelineCard key={p.id} pipeline={p} />
         ))}
       </main>

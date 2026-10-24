@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { API_BASE, startPipeline, stopPipeline } from '../hooks/useForgeApi';
 
 export default function LiveStreamViewer({ pipeline, latestMetrics, pipelineStatus }) {
