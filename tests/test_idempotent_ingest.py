@@ -46,6 +46,10 @@ class TestIdempotentIngest(unittest.TestCase):
             })
 
         batch_data = {
+            "schema_version": "1.0.0",
+            "boot_id": edge_id,
+            "sequence_range": {"start": 0, "end": 19},
+            "transmitted_at_ms": time.time() * 1000.0,
             "edge_id": edge_id,
             "source_id": "1",
             "batch_id": batch_id,

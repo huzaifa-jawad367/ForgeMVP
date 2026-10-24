@@ -12,24 +12,27 @@ from app.storage.maintenance import purge_expired_data
 class TestTTLMaintenance(unittest.TestCase):
     def setUp(self):
         self.temp_db_fd, self.temp_db_path = tempfile.mkstemp()
+        os.close(self.temp_db_fd)
         self.engine = create_engine(f"sqlite:///{self.temp_db_path}")
         Base.metadata.create_all(self.engine)
         self.SessionLocal = sessionmaker(bind=self.engine)
 
         self.temp_evidence_fd, self.temp_evidence_path = tempfile.mkstemp()
+        os.close(self.temp_evidence_fd)
 
     def tearDown(self):
-        os.close(self.temp_db_fd)
+        self.engine.dispose()
         if os.path.exists(self.temp_db_path):
-            os.remove(self.temp_db_path)
-
-        try:
-            os.close(self.temp_evidence_fd)
-        except OSError:
-            pass
+            try:
+                os.remove(self.temp_db_path)
+            except OSError:
+                pass
 
         if os.path.exists(self.temp_evidence_path):
-            os.remove(self.temp_evidence_path)
+            try:
+                os.remove(self.temp_evidence_path)
+            except OSError:
+                pass
 
     def test_purge_expired_data(self):
         with self.SessionLocal() as session:
