@@ -7,6 +7,7 @@ disconnections, with thread-safe atomic push and lease-ack operations.
 
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import logging
 import sqlite3
@@ -69,7 +70,7 @@ class EdgeBuffer:
         max_size: int = 5000,
         db_path: Optional[str] = None,
     ) -> None:
-        self.max_size = max_size
+        self.max_size = max(1, max_size)
         self.db_path = db_path
         self._lock = threading.Lock()
         self._queue: List[EdgePayload] = []
@@ -77,6 +78,8 @@ class EdgeBuffer:
         self.total_enqueued = 0
         self.total_synced = 0
         self.total_dropped = 0
+        self.persistence_errors = 0
+        self.last_persistence_error = None
         self.drops_by_tier = {
             PriorityTier.P0_INCIDENT: 0,
             PriorityTier.P1_ANOMALY: 0,
@@ -93,7 +96,7 @@ class EdgeBuffer:
             return
         p = Path(self.db_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS edge_queue (
@@ -111,91 +114,72 @@ class EdgeBuffer:
             for (row_json,) in rows:
                 try:
                     payload = EdgePayload.from_dict(json.loads(row_json))
+                    if payload.priority not in self.drops_by_tier:
+                        raise ValueError("Unsupported persisted priority")
                     self._queue.append(payload)
                 except Exception as e:
-                    logger.warning("Could not restore edge payload: %s", e)
+                    self._persistence_failed(e)
+            if len(self._queue) > self.max_size:
+                logger.warning("Restored backlog exceeds configured capacity; preserving existing records")
+                self.max_size = len(self._queue)
             if self._queue:
                 logger.info("Restored %d unsynced payloads from edge disk buffer.", len(self._queue))
 
+    def _persistence_failed(self, error: Exception) -> None:
+        self.persistence_errors += 1
+        self.last_persistence_error = str(error)
+        logger.error("Edge queue persistence failed: %s", error)
+
     def push(self, payload: EdgePayload) -> bool:
-        """Push an inference payload into the edge buffer."""
+        return self.push_with_result(payload)[0]
+
+    def push_with_result(self, payload: EdgePayload) -> tuple[bool, list[str]]:
+        """Commit replacement and insertion together before publishing admission."""
         with self._lock:
-            # Check disk fullness circuit breaker (95%)
-            disk_path = self.db_path or "/"
-            try:
-                # Resolve directory for disk usage
-                check_path = Path(disk_path).parent if self.db_path else Path(disk_path)
-                if check_path.exists():
-                    total, used, free = shutil.disk_usage(check_path)
-                    if total > 0 and (used / total) >= 0.95:
-                        logger.critical("Circuit Breaker: Edge disk >= 95%% full. Halting local caching.")
-                        self.total_dropped += 1
-                        self.drops_by_tier[payload.priority] += 1
-                        return False
-            except Exception as e:
-                logger.warning(f"Failed to check disk usage: {e}")
+            def reject():
+                self.total_dropped += 1
+                self.drops_by_tier[payload.priority] += 1
+                return False, []
 
-            high_watermark = int(self.max_size * 0.80)
-
-            # If buffer size is above or equal to high watermark, we evict to make room for the new incoming payload.
-            if len(self._queue) >= high_watermark:
-                evict_candidates = [
-                    PriorityTier.P3_METRIC,
-                    PriorityTier.P2_DIAGNOSTIC,
-                    PriorityTier.P1_ANOMALY
-                ]
-
-                evicted = False
-                for target_priority in evict_candidates:
-                    for i in range(len(self._queue)):
-                        if self._queue[i].priority == target_priority:
-                            dropped = self._queue.pop(i)
-                            self.total_dropped += 1
-                            self.drops_by_tier[dropped.priority] += 1
-                            if self.db_path:
-                                try:
-                                    with sqlite3.connect(self.db_path) as conn:
-                                        conn.execute("DELETE FROM edge_queue WHERE payload_id = ?", (dropped.payload_id,))
-                                except Exception:
-                                    pass
-                            logger.warning(
-                                "Edge buffer >= 80%% (%d items). Evicted %s frame #%d",
-                                len(self._queue) + 1,
-                                dropped.priority,
-                                dropped.frame_index,
-                            )
-                            evicted = True
-                            break
-                    if evicted:
-                        break
-
-                if not evicted:
-                    if payload.priority != PriorityTier.P0_INCIDENT:
-                        self.total_dropped += 1
-                        self.drops_by_tier[payload.priority] += 1
-                        logger.warning("Edge buffer full of P0s. Dropped incoming %s", payload.priority)
-                        return False
-                    else:
-                        if len(self._queue) >= self.max_size:
-                            logger.warning("Edge buffer at absolute max capacity with P0s. Dropping incoming P0.")
-                            self.total_dropped += 1
-                            self.drops_by_tier[payload.priority] += 1
-                            return False
-
-            self._queue.append(payload)
-            self.total_enqueued += 1
-
+            if any(p.payload_id == payload.payload_id for p in self._queue):
+                return False, []
+            if payload.priority not in self.drops_by_tier:
+                return False, []
             if self.db_path:
                 try:
-                    with sqlite3.connect(self.db_path) as conn:
+                    usage = shutil.disk_usage(Path(self.db_path).parent)
+                    if usage.total and usage.used / usage.total >= .95:
+                        return reject()
+                except OSError as error:
+                    self._persistence_failed(error)
+                    return reject()
+            dropped = None
+            if len(self._queue) >= max(1, int(self.max_size * .8)):
+                for priority in (PriorityTier.P3_METRIC, PriorityTier.P2_DIAGNOSTIC, PriorityTier.P1_ANOMALY):
+                    dropped = next((p for p in self._queue if p.priority == priority), None)
+                    if dropped:
+                        break
+                if dropped is None and (payload.priority != PriorityTier.P0_INCIDENT or len(self._queue) >= self.max_size):
+                    return reject()
+            if self.db_path:
+                try:
+                    with closing(sqlite3.connect(self.db_path)) as conn, conn:
+                        if dropped:
+                            conn.execute("DELETE FROM edge_queue WHERE payload_id = ?", (dropped.payload_id,))
                         conn.execute(
-                            "INSERT OR REPLACE INTO edge_queue (payload_id, frame_index, created_at, payload_json) VALUES (?, ?, ?, ?)",
+                            "INSERT INTO edge_queue (payload_id, frame_index, created_at, payload_json) VALUES (?, ?, ?, ?)",
                             (payload.payload_id, payload.frame_index, payload.created_at, json.dumps(payload.to_dict())),
                         )
-                except Exception as e:
-                    logger.error("Failed to write edge payload to SQLite: %s", e)
-
-            return True
+                except Exception as error:
+                    self._persistence_failed(error)
+                    return reject()
+            if dropped:
+                self._queue.remove(dropped)
+                self.total_dropped += 1
+                self.drops_by_tier[dropped.priority] += 1
+            self._queue.append(payload)
+            self.total_enqueued += 1
+            return True, [dropped.payload_id] if dropped else []
 
     def peek_batch(self, max_items: int = 20) -> List[EdgePayload]:
         """Peek at the oldest up to `max_items` without removing them."""
@@ -208,28 +192,18 @@ class EdgeBuffer:
             return 0
 
         id_set = set(payload_ids)
-        removed_count = 0
         with self._lock:
-            new_queue = []
-            for item in self._queue:
-                if item.payload_id in id_set:
-                    removed_count += 1
-                else:
-                    new_queue.append(item)
-            self._queue = new_queue
-            self.total_synced += removed_count
-
-            if self.db_path and removed_count > 0:
+            removed_count = sum(item.payload_id in id_set for item in self._queue)
+            if self.db_path and removed_count:
                 try:
-                    with sqlite3.connect(self.db_path) as conn:
-                        conn.executemany(
-                            "DELETE FROM edge_queue WHERE payload_id = ?",
-                            [(pid,) for pid in id_set],
-                        )
-                except Exception as e:
-                    logger.error("Failed to remove synced payloads from SQLite: %s", e)
-
-        return removed_count
+                    with closing(sqlite3.connect(self.db_path)) as conn, conn:
+                        conn.executemany("DELETE FROM edge_queue WHERE payload_id = ?", [(pid,) for pid in id_set])
+                except Exception as error:
+                    self._persistence_failed(error)
+                    return 0
+            self._queue = [item for item in self._queue if item.payload_id not in id_set]
+            self.total_synced += removed_count
+            return removed_count
 
     def size(self) -> int:
         """Current number of buffered unsynced payloads."""
@@ -253,7 +227,25 @@ class EdgeBuffer:
             for item in self._queue:
                 counts[item.priority] += 1
 
+            persisted_rows = None
+            storage_used_bytes = None
+            if self.db_path:
+                try:
+                    with closing(sqlite3.connect(self.db_path)) as conn, conn:
+                        persisted_rows = conn.execute("SELECT COUNT(*) FROM edge_queue").fetchone()[0]
+                    storage_used_bytes = sum(Path(str(self.db_path) + suffix).stat().st_size
+                                             for suffix in ("", "-wal", "-shm")
+                                             if Path(str(self.db_path) + suffix).exists())
+                except Exception as error:
+                    self._persistence_failed(error)
             return {
+                "capacity": self.max_size,
+                "persisted_rows": persisted_rows,
+                "storage_used_bytes": storage_used_bytes,
+                "oldest_pending_age_seconds": max(0., time.time() - min(p.created_at for p in self._queue)) if self._queue else None,
+                "persistence_errors": self.persistence_errors,
+                "last_persistence_error": self.last_persistence_error,
+                "durable": bool(self.db_path) and persisted_rows == len(self._queue),
                 "queue_size": len(self._queue),
                 "max_size": self.max_size,
                 "total_enqueued": self.total_enqueued,

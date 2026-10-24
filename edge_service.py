@@ -52,8 +52,8 @@ def main() -> None:
     parser.add_argument(
         "--fps",
         type=float,
-        default=10.0,
-        help="Target processing rate in FPS (default: 10.0).",
+        default=1.0,
+        help="Target processing rate in FPS (default: 1.0).",
     )
     parser.add_argument(
         "--sync-interval",
@@ -84,7 +84,12 @@ def main() -> None:
         action="store_true",
         help="Stop when end of dataset is reached instead of looping.",
     )
+    parser.add_argument("--db-path", default="outputs/edge_buffer.db", help="SQLite queue path.")
+    parser.add_argument("--demo-port", type=int, default=None,
+                        help="Opt in to the loopback-only demo API (recommended: 8001).")
     args = parser.parse_args()
+    if args.demo_port is not None and not 1 <= args.demo_port <= 65535:
+        parser.error("--demo-port must be between 1 and 65535")
 
     service = EdgeService(
         edge_id=args.edge_id,
@@ -96,6 +101,8 @@ def main() -> None:
         buffer_max_size=args.buffer_size,
         loop=not args.no_loop,
         initial_noise=args.noise,
+        db_path=args.db_path,
+        demo_port=args.demo_port,
     )
 
     def handle_exit(sig, frame):

@@ -65,13 +65,14 @@ class EdgeService:
         edge_id: str = "edge-node-01",
         source_input: str = "visa:pcb1",
         backend_url: str = "http://localhost:8000",
-        target_fps: float = 10.0,
+        target_fps: float = 1.0,
         sync_interval_s: float = 0.2,
         batch_size: int = 15,
         buffer_max_size: int = 5000,
         db_path: Optional[str] = "outputs/edge_buffer.db",
         loop: bool = True,
         initial_noise: float = 0.0,
+        demo_port: Optional[int] = None,
     ) -> None:
         self.edge_id = edge_id
         self.source_input = source_input
@@ -111,6 +112,27 @@ class EdgeService:
         self.frames_processed = 0
         self.is_connected = False
         self.last_sync_time = 0.0
+        self._sync_condition = threading.Condition(threading.RLock())
+        self._sync_paused = False
+        self._sync_in_flight = False
+        self._last_capture_mono = None
+        self._observed_fps = None
+        self._inference_time_ms = None
+        self._last_ack_mono = None
+        self._round_trip_ms = None
+        self._sync_attempts = 0
+        self._sync_retries = 0
+        self._sync_deduplicated = 0
+        self._sync_error = None
+        self._next_sync_mono = 0.
+        self._attempted_ids = set()
+        self.demo_port = demo_port
+        self.demo = None
+        self._demo_server = None
+        self._demo_thread = None
+        if demo_port is not None:
+            from app.edge.demo import DemoController
+            self.demo = DemoController(self)
 
     def _init_model(self) -> None:
         """Initialise the edge inference model."""
@@ -133,6 +155,10 @@ class EdgeService:
     def start(self) -> None:
         """Start edge inference and background sync worker."""
         self._shutdown_event.clear()
+        if self.demo:
+            from app.edge.demo_api import start_demo_server
+            self.demo.start_monitor()
+            self._demo_server, self._demo_thread = start_demo_server(self, self.demo_port)
 
         # Inference loop thread
         self._inference_thread = threading.Thread(
@@ -161,6 +187,9 @@ class EdgeService:
     def stop(self) -> None:
         """Stop edge service gracefully."""
         self._shutdown_event.set()
+        if self._demo_server:
+            self._demo_server.should_exit = True
+            self._demo_thread.join(timeout=2)
         if self._inference_thread and self._inference_thread.is_alive():
             self._inference_thread.join(timeout=2.0)
         if self._sync_thread and self._sync_thread.is_alive():
@@ -396,7 +425,10 @@ class EdgeService:
                     "queued_at_ns": time.monotonic_ns(),
                 }
             )
-            self.buffer.push(payload)
+            self.admit_payload(payload)
+            self._last_capture_mono = time.monotonic()
+            self._observed_fps = measured_fps
+            self._inference_time_ms = inference_time_ms
 
             frame_counter += 1
             self.frames_processed = frame_counter
@@ -412,86 +444,88 @@ class EdgeService:
                     self.buffer.size(),
                 )
 
-    def _run_sync_worker(self) -> None:
-        """Batch and sync buffered payloads to Forge central backend."""
-        while not self._shutdown_event.is_set():
-            time.sleep(self.sync_interval_s)
-            sync_url = f"{self.backend_url}/api/edge/sync"
+    def admit_payload(self, payload: EdgePayload) -> bool:
+        with self._sync_condition:
+            admitted, evicted = self.buffer.push_with_result(payload)
+            if self.demo:
+                self.demo.captured(payload.payload_id, admitted, evicted)
+            return admitted
 
-            # Peek a batch from the edge buffer
+    def _run_sync_worker(self) -> None:
+        while not self._shutdown_event.wait(self.sync_interval_s):
+            self._sync_once()
+
+    def _sync_once(self) -> None:
+        with self._sync_condition:
+            if self._sync_paused or self._sync_in_flight:
+                return
             batch = self.buffer.peek_batch(self.batch_size)
             if not batch:
-                continue
-
+                return
+            boot_id = batch[0].boot_id
+            batch = [p for p in batch if p.boot_id == boot_id]
+            self._sync_in_flight = True
+            ids = [p.payload_id for p in batch]
+            self._sync_attempts += 1
+            if self._attempted_ids.intersection(ids):
+                self._sync_retries += 1
+            self._attempted_ids.update(ids)
+        started = time.monotonic()
+        try:
             with self._latest_jpeg_lock:
                 latest_jpeg = self._latest_jpeg_b64
-
-            # Prepare sync batch package
-            transmitted_at_ms = time.time() * 1000.0
-            transmitted_at_ns = time.monotonic_ns()
-
-            # Inject transmitted_at_ns into frames
-            frames_dict = []
-            for p in batch:
-                p_dict = p.to_dict()
-                if "timestamps" in p_dict:
-                    p_dict["timestamps"]["transmitted_at_ns"] = transmitted_at_ns
-                frames_dict.append(p_dict)
-
-            sequence_start = batch[0].sequence_number if batch else 0
-            sequence_end = batch[-1].sequence_number if batch else 0
-
+            frames = [p.to_dict() for p in batch]
+            for frame in frames:
+                frame['timestamps']['transmitted_at_ns'] = time.monotonic_ns()
             from app.schema.contracts import SCHEMA_VERSION
-            payload_data = {
-                "schema_version": SCHEMA_VERSION,
-                "boot_id": self.boot_id,
-                "sequence_range": {"start": sequence_start, "end": sequence_end},
-                "transmitted_at_ms": transmitted_at_ms,
-                "edge_id": self.edge_id,
-                "source_id": self.source_input,
-                "batch_id": str(uuid.uuid4()),
-                "frames": frames_dict,
-                "edge_buffer_stats": self.buffer.get_stats(),
-                "latest_frame_jpeg": latest_jpeg,
-            }
-
-            try:
-                json_bytes = json.dumps(payload_data).encode("utf-8")
-                req = urllib.request.Request(
-                    sync_url,
-                    data=json_bytes,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=3.0) as resp:
-                    if resp.status == 200:
-                        body_resp = json.loads(resp.read().decode("utf-8"))
-                        # Acknowledge synced items from edge buffer
-                        synced_ids = [p.payload_id for p in batch]
-                        self.buffer.ack_batch(synced_ids)
-
-                        self.is_connected = True
-                        self.last_sync_time = time.time()
-
-                        # Apply any control updates sent back by the backend (e.g. noise injection)
-                        controls = body_resp.get("controls", {})
-                        if "noise" in controls:
-                            self.degradation["noise"] = float(controls["noise"])
-                        if "blur" in controls:
-                            self.degradation["blur"] = float(controls["blur"])
-                        if "brightness" in controls:
-                            self.degradation["brightness"] = float(controls["brightness"])
-                        if "confidence" in controls:
-                            self.degradation["confidence"] = float(controls["confidence"])
-                        if "latency" in controls:
-                            self.degradation["latency"] = float(controls["latency"])
-
-            except Exception as e:
+            package = dict(schema_version=SCHEMA_VERSION, boot_id=boot_id,
+                           sequence_range=dict(start=batch[0].sequence_number, end=batch[-1].sequence_number),
+                           transmitted_at_ms=time.time() * 1000, edge_id=self.edge_id,
+                           source_id=self.source_input, batch_id=str(uuid.uuid4()), frames=frames,
+                           edge_buffer_stats=self.buffer.get_stats(), latest_frame_jpeg=latest_jpeg)
+            request = urllib.request.Request(f"{self.backend_url}/api/edge/sync",
+                                             data=json.dumps(package).encode(),
+                                             headers={'Content-Type': 'application/json'}, method='POST')
+            with urllib.request.urlopen(request, timeout=3.) as response:
+                if response.status != 200:
+                    raise ValueError(f"Sync returned HTTP {response.status}")
+                ack = json.loads(response.read().decode())
+            acknowledged = ack.get('acknowledged_payload_ids')
+            inserted, deduplicated = ack.get('frames_ingested'), ack.get('frames_deduplicated')
+            if (ack.get('status') != 'ack' or ack.get('edge_id') != self.edge_id
+                    or ack.get('batch_id') != package['batch_id']
+                    or not isinstance(acknowledged, list) or len(acknowledged) != len(ids)
+                    or set(acknowledged) != set(ids)
+                    or type(inserted) is not int or type(deduplicated) is not int
+                    or inserted < 0 or deduplicated < 0 or inserted + deduplicated != len(ids)):
+                raise ValueError('Invalid backend acknowledgement; retaining queued payloads')
+            with self._sync_condition:
+                pending = {p.payload_id for p in self.buffer.peek_batch(self.buffer.max_size)}
+                expected_removed = len(pending.intersection(ids))
+                removed = self.buffer.ack_batch(ids)
+                if removed != expected_removed:
+                    raise OSError('Could not durably remove acknowledged payloads; retry remains queued')
+                if self.demo:
+                    self.demo.acknowledged(ids)
+                self._attempted_ids.difference_update(ids)
+                self.is_connected = True
+                self.last_sync_time = time.time()
+                self._last_ack_mono = time.monotonic()
+                self._round_trip_ms = (self._last_ack_mono - started) * 1000
+                self._sync_deduplicated += deduplicated
+                self._sync_error = None
+                controls = ack.get('controls', {})
+                for key in ('noise', 'blur', 'brightness', 'confidence', 'latency'):
+                    if key in controls:
+                        self.degradation[key] = float(controls[key])
+        except Exception as error:
+            with self._sync_condition:
                 self.is_connected = False
-                logger.warning(
-                    "[%s] Backend unreachable at %s (%s). Retaining %d frames in edge buffer.",
-                    self.edge_id,
-                    sync_url,
-                    e,
-                    self.buffer.size(),
-                )
+                self._sync_error = str(error)
+                self._attempted_ids.intersection_update(p.payload_id for p in self.buffer.peek_batch(self.buffer.max_size))
+            logger.warning('[%s] Sync failed; queued data retained: %s', self.edge_id, error)
+        finally:
+            with self._sync_condition:
+                self._next_sync_mono = time.monotonic() + self.sync_interval_s
+                self._sync_in_flight = False
+                self._sync_condition.notify_all()
