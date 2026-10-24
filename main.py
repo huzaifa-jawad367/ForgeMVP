@@ -680,6 +680,8 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
 
                 metric_dict = {
                     "source_id": 1,
+                    "edge_id": batch.edge_id,
+                    "payload_id": frame.get("payload_id"),
                     "frame_index": frame_index,
                     "boot_id": frame.get("boot_id", batch.boot_id),
                     "sequence_number": frame.get("sequence_number", 0),
@@ -694,6 +696,8 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
                     "brightness": frame.get("brightness", 0.0),
                     "blur_score": frame.get("blur_score", 0.0),
                     "noise_score": frame.get("noise_score", 0.0),
+                    "anomaly_score": frame.get("anomaly_score"),
+                    "has_anomaly": frame.get("has_anomaly"),
                 }
                 _, is_inserted = store_frame_metric_idempotent(session, metric_dict)
                 if not is_inserted:
@@ -735,6 +739,7 @@ def process_edge_sync_batch(batch: EdgeSyncBatch) -> Tuple[int, int]:
 
         except Exception as e:
             logger.exception("Database write for edge frame %d: %s", frame_index, e)
+            raise
 
         # Telemetry export to frontend WebSocket
         try:

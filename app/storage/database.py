@@ -17,6 +17,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     Float,
@@ -26,7 +27,10 @@ from sqlalchemy import (
     Text,
     create_engine,
     desc,
+    inspect,
+    text,
 )
+from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger("forge.database")
 from sqlalchemy.orm import (
@@ -96,6 +100,8 @@ class FrameMetric(Base):
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     source_id: int = Column(Integer, nullable=False, index=True)
+    edge_id: str = Column(String(128), nullable=False, default="")
+    payload_id: Optional[str] = Column(String(128), nullable=True)
     frame_index: int = Column(Integer, nullable=False)
     timestamp_ms: float = Column(Float, nullable=False)
     fps: float = Column(Float, nullable=False)
@@ -106,6 +112,8 @@ class FrameMetric(Base):
     brightness: float = Column(Float, nullable=False, default=0.0)
     blur_score: float = Column(Float, nullable=False, default=0.0)
     noise_score: Optional[float] = Column(Float, nullable=True, default=0.0)
+    anomaly_score: Optional[float] = Column(Float, nullable=True)
+    has_anomaly: Optional[bool] = Column(Boolean, nullable=True)
     boot_id: str = Column(String(36), nullable=False, default="")
     sequence_number: int = Column(Integer, nullable=False, default=0)
     captured_at_ns: Optional[int] = Column(BigInteger, nullable=True)
@@ -209,6 +217,27 @@ def init_db() -> None:
     except Exception as e:
         logger.warning("Database schema migration check failed (non-fatal): %s", e)
 
+    with engine.begin() as conn:
+        columns = {column["name"] for column in inspect(conn).get_columns("frame_metrics")}
+        if "edge_id" not in columns:
+            conn.execute(text("ALTER TABLE frame_metrics ADD COLUMN edge_id VARCHAR(128) NOT NULL DEFAULT ''"))
+        if "payload_id" not in columns:
+            conn.execute(text("ALTER TABLE frame_metrics ADD COLUMN payload_id VARCHAR(128)"))
+        if "anomaly_score" not in columns:
+            conn.execute(text("ALTER TABLE frame_metrics ADD COLUMN anomaly_score FLOAT"))
+        if "has_anomaly" not in columns:
+            conn.execute(text("ALTER TABLE frame_metrics ADD COLUMN has_anomaly BOOLEAN"))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_frame_edge_boot_sequence "
+            "ON frame_metrics(edge_id, boot_id, sequence_number) "
+            "WHERE edge_id <> '' AND boot_id <> ''"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_frame_edge_payload "
+            "ON frame_metrics(edge_id, payload_id) "
+            "WHERE edge_id <> '' AND payload_id IS NOT NULL"
+        ))
+
 
 # ---------------------------------------------------------------------------
 # Session helper
@@ -245,30 +274,62 @@ from typing import Tuple
 def store_frame_metric_idempotent(session: Session, data: Dict[str, Any]) -> Tuple[Optional[FrameMetric], bool]:
     """Idempotently insert a single :class:`FrameMetric` row.
 
-    Checks if a record with (source_id, boot_id, sequence_number) already exists
-    when boot_id is non-empty.
+    Edge deliveries use (edge_id, boot_id, sequence_number) and a stable payload_id.
+    Legacy non-edge callers retain source-scoped lookup when boot_id is non-empty.
 
     Returns:
         Tuple of (metric, is_new).
     """
     source_id = data.get("source_id")
+    edge_id = data.get("edge_id", "")
     boot_id = data.get("boot_id", "")
     seq_num = data.get("sequence_number", 0)
 
-    if boot_id:
-        existing = (
-            session.query(FrameMetric)
-            .filter_by(source_id=source_id, boot_id=boot_id, sequence_number=seq_num)
-            .first()
-        )
-        if existing:
-            return existing, False
+    def find_existing():
+        if edge_id and boot_id:
+            return session.query(FrameMetric).filter_by(
+                edge_id=edge_id, boot_id=boot_id, sequence_number=seq_num
+            ).first()
+        elif edge_id and data.get("payload_id"):
+            return session.query(FrameMetric).filter_by(
+                edge_id=edge_id, payload_id=data["payload_id"]
+            ).first()
+        elif boot_id:
+            return session.query(FrameMetric).filter_by(
+                source_id=source_id, boot_id=boot_id, sequence_number=seq_num
+            ).first()
+        elif data.get("payload_id"):
+            return session.query(FrameMetric).filter_by(
+                payload_id=data["payload_id"]
+            ).first()
+        return None
+
+    def check_payload(existing):
+        if data.get("payload_id") and existing.payload_id != data["payload_id"]:
+            raise ValueError("A frame identity was reused for a different payload")
+        return existing, False
+
+    existing = find_existing()
+    if existing:
+        return check_payload(existing)
 
     valid_cols = {c.name for c in FrameMetric.__table__.columns}
     payload = {k: v for k, v in data.items() if k in valid_cols}
     metric = FrameMetric(**payload)
-    session.add(metric)
-    session.flush()
+    if session.get_bind().dialect.name == "sqlite":
+        connection = session.connection()
+        if not connection.connection.driver_connection.in_transaction:
+            # SQLite's legacy transaction mode otherwise commits a released savepoint independently.
+            connection.exec_driver_sql("BEGIN")
+    try:
+        with session.begin_nested():
+            session.add(metric)
+            session.flush()
+    except IntegrityError:
+        existing = find_existing()
+        if existing is None:
+            raise
+        return check_payload(existing)
     return metric, True
 
 def store_frame_metric(session: Session, data: Dict[str, Any]) -> FrameMetric:
@@ -298,25 +359,46 @@ def store_system_metric(session: Session, data: Dict[str, Any]) -> SystemMetric:
 
 
 def store_incident(session: Session, data: Dict[str, Any]) -> Incident:
-    """Insert a single :class:`Incident` row.
+    """Insert or update a single :class:`Incident` row.
 
     The ``metrics_snapshot`` value is automatically JSON-encoded if it is
-    passed as a dict.
+    passed as a dict. If an incident with the given ID already exists,
+    it is updated in-place (upsert).
     """
     payload = dict(data)
+    incident_id = payload.get("id")
 
-    # Ensure metrics_snapshot is stored as a JSON string.
+    # If events list is passed in data, preserve it in metrics_snapshot
+    events_list = payload.pop("events", None)
+
     snap = payload.get("metrics_snapshot")
     if isinstance(snap, dict):
+        if events_list is not None and "events" not in snap:
+            snap["events"] = events_list
         payload["metrics_snapshot"] = json.dumps(snap, default=str)
 
     # Parse ISO datetime strings into proper datetime objects.
     for dt_field in ("start_time", "end_time"):
         val = payload.get(dt_field)
         if isinstance(val, str):
-            payload[dt_field] = datetime.fromisoformat(val)
+            try:
+                payload[dt_field] = datetime.fromisoformat(val)
+            except Exception:
+                pass
 
-    incident = Incident(**payload)
+    valid_cols = {c.name for c in Incident.__table__.columns}
+    clean_payload = {k: v for k, v in payload.items() if k in valid_cols}
+
+    if incident_id:
+        existing = session.query(Incident).filter_by(id=incident_id).first()
+        if existing:
+            for k, v in clean_payload.items():
+                if hasattr(existing, k):
+                    setattr(existing, k, v)
+            session.flush()
+            return existing
+
+    incident = Incident(**clean_payload)
     session.add(incident)
     session.flush()
     return incident

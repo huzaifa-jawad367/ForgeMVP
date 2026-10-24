@@ -100,6 +100,11 @@ class EdgeSyncBatch(BaseModel):
     latest_frame_jpeg: Optional[str] = None  # Base64 encoded JPEG preview
 
 
+class ReconciliationInput(BaseModel):
+    edge_id: str = Field(min_length=1, max_length=128)
+    payload_ids: List[str] = Field(max_length=1000)
+
+
 # Global processor callback registered by main backend
 from typing import Tuple
 _edge_sync_processor: Optional[Callable[[EdgeSyncBatch], Tuple[int, int]]] = None
@@ -315,6 +320,41 @@ def demo_status() -> Any:
     return dict(DEGRADATION_STATE)
 
 
+@router.post("/api/demo/reconcile", tags=["Demo"])
+def reconcile_payloads(body: ReconciliationInput) -> Any:
+    requested = set(body.payload_ids)
+    if any(not payload_id or len(payload_id) > 128 for payload_id in requested):
+        raise HTTPException(status_code=422, detail="Invalid payload identity")
+    try:
+        with get_session() as session:
+            rows = session.query(FrameMetric.payload_id).filter(
+                FrameMetric.edge_id == body.edge_id,
+                FrameMetric.payload_id.in_(requested),
+            ).all() if requested else []
+            committed = {row[0] for row in rows}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Backend persistence is unavailable") from exc
+    return {
+        "edge_id": body.edge_id,
+        "requested_count": len(requested),
+        "committed_count": len(committed),
+        "committed_payload_ids": sorted(committed),
+        "missing_payload_ids": sorted(requested - committed),
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/api/demo/summary", tags=["Demo"])
+def demo_summary() -> Any:
+    with get_session() as session:
+        return {
+            "frames_committed": session.query(FrameMetric).count(),
+            "incidents_total": session.query(Incident).count(),
+            "incidents_active": session.query(Incident).filter(Incident.status == "active").count(),
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
 @router.post("/api/demo/degrade", tags=["Demo"])
 def demo_degrade(body: DegradationInput) -> Any:
     """Apply degradation settings used by the pipeline in real time."""
@@ -395,7 +435,12 @@ def edge_sync(batch: EdgeSyncBatch) -> Any:
             else:
                 ingested_count = res
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to process edge sync batch: {e}")
+            raise HTTPException(status_code=503, detail="Backend could not commit the batch; retry retained payloads") from e
+    else:
+        raise HTTPException(status_code=503, detail="Edge ingestion is not ready")
+
+    if ingested_count + deduplicated_count != len(batch.frames):
+        raise HTTPException(status_code=503, detail="Batch was not fully committed")
 
     return {
         "status": "ack",
@@ -403,6 +448,7 @@ def edge_sync(batch: EdgeSyncBatch) -> Any:
         "batch_id": batch.batch_id,
         "frames_ingested": ingested_count,
         "frames_deduplicated": deduplicated_count,
+        "acknowledged_payload_ids": [frame["payload_id"] for frame in batch.frames if frame.get("payload_id")],
         "controls": dict(DEGRADATION_STATE),
     }
 
@@ -431,10 +477,20 @@ def edge_status() -> Any:
 # =========================================================================
 
 
+def _utc_iso(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc).isoformat() if value.tzinfo is None else value.astimezone(timezone.utc).isoformat()
+
+
 def _frame_metric_to_dict(m: FrameMetric) -> Dict[str, Any]:
     return {
         "id": m.id,
         "source_id": m.source_id,
+        "edge_id": m.edge_id,
+        "payload_id": m.payload_id,
+        "boot_id": m.boot_id,
+        "sequence_number": m.sequence_number,
         "frame_index": m.frame_index,
         "timestamp_ms": m.timestamp_ms,
         "fps": m.fps,
@@ -444,7 +500,10 @@ def _frame_metric_to_dict(m: FrameMetric) -> Dict[str, Any]:
         "num_detections": m.num_detections,
         "brightness": m.brightness,
         "blur_score": m.blur_score,
-        "created_at": m.created_at.isoformat() if m.created_at else None,
+        "noise_score": m.noise_score,
+        "anomaly_score": m.anomaly_score,
+        "has_anomaly": m.has_anomaly,
+        "created_at": _utc_iso(m.created_at),
     }
 
 
@@ -456,7 +515,7 @@ def _system_metric_to_dict(m: SystemMetric) -> Dict[str, Any]:
         "gpu_utilization": m.gpu_utilization,
         "gpu_memory_percent": m.gpu_memory_percent,
         "gpu_temperature": m.gpu_temperature,
-        "created_at": m.created_at.isoformat() if m.created_at else None,
+        "created_at": _utc_iso(m.created_at),
     }
 
 
@@ -474,17 +533,17 @@ def _incident_to_dict(i: Incident) -> Dict[str, Any]:
         "source_id": i.source_id,
         "subsystem_attribution": i.subsystem_attribution,
         "root_cause_reason": i.root_cause_reason,
-        "start_time": i.start_time.isoformat() if i.start_time else None,
-        "end_time": i.end_time.isoformat() if i.end_time else None,
-        "started_at": i.start_time.isoformat() if i.start_time else None,
-        "resolved_at": i.end_time.isoformat() if i.end_time else None,
+        "start_time": _utc_iso(i.start_time),
+        "end_time": _utc_iso(i.end_time),
+        "started_at": _utc_iso(i.start_time),
+        "resolved_at": _utc_iso(i.end_time),
         "start_frame": i.start_frame,
         "end_frame": i.end_frame,
         "status": i.status,
         "severity": i.severity,
         "evidence_path": i.evidence_path,
         "metrics_snapshot": snap,
-        "created_at": i.created_at.isoformat() if i.created_at else None,
+        "created_at": _utc_iso(i.created_at),
     }
 
 
@@ -496,5 +555,5 @@ def _audit_log_to_dict(a: AuditLog) -> Dict[str, Any]:
         "client_ip": a.client_ip,
         "user_agent": a.user_agent,
         "details": a.details,
-        "created_at": a.created_at.isoformat() if a.created_at else None,
+        "created_at": _utc_iso(a.created_at),
     }
